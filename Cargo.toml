@@ -36,6 +36,10 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 axum = "0.8.9"
 rayon = "1.12"
 trnsprt-macros = { path = "shared/trnsprt/macros" }
+crossterm = "0.29"
+toml = "0.8"
+unicode-segmentation = "1"
+unicode-width = "0.2"
 
 [workspace.lints.rust]
 warnings = "deny"
@@ -97,7 +101,7 @@ async-trait = "0.1"
 
 [dev-dependencies]
 proptest = "1"
-test-utils = { path = "test_utils" }
+kern-test-utils = { path = "test_utils" }
 criterion = "0.5"
 tempfile = "3"
 
