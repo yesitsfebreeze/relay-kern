@@ -1,0 +1,71 @@
+set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
+
+compose    := "docker compose -f docker/docker-compose.yml"
+hunt_outdir := justfile_directory() / "docker" / "out"
+
+default:
+    @just --list
+
+check:
+    cargo check --workspace
+
+build:
+    cargo build
+
+release:
+    cargo build --release
+
+run:
+    cargo run --bin kern -- --daemon
+
+test:
+    cargo test --workspace
+
+fmt:
+    cargo fmt --all -- --check
+
+fmt-fix:
+    cargo fmt --all
+
+clippy:
+    cargo clippy --all-targets -- -D warnings
+
+install: release
+    cargo install --path . --force
+
+uninstall:
+    -cargo uninstall kern
+
+clean:
+    cargo clean
+
+[windows]
+kill:
+    -taskkill /IM kern.exe /F 2>$null
+
+[unix]
+kill:
+    -pkill -f kern
+
+docker-build:
+    {{compose}} build
+
+docker:
+    {{compose}} run --rm --remove-orphans dev
+
+hunt-run SECS="300":
+    HUNT_SECS={{SECS}} {{compose}} run --rm dev bash docker/hunt.sh
+
+hunt-print:
+    {{compose}} run --rm dev bash -c 'heaptrack_print $(ls -t docker/out/heaptrack.kern.*.gz | head -1) | less -R'
+
+hunt-leaks:
+    {{compose}} run --rm dev bash -c 'heaptrack_print --print-leaks $(ls -t docker/out/heaptrack.kern.*.gz | head -1) | head -60'
+
+[windows]
+hunt-clean:
+    -Remove-Item -Recurse -Force "{{hunt_outdir}}"
+
+[unix]
+hunt-clean:
+    rm -rf "{{hunt_outdir}}"

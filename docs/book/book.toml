@@ -1,0 +1,28 @@
+[book]
+title = "Relay"
+authors = ["Relay contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/yesitsfebreeze/relay"
+edit-url-template = "https://github.com/yesitsfebreeze/relay/edit/relay/docs/book/{path}"
+additional-css = ["theme/custom.css"]
+additional-js = ["theme/custom.js"]
+no-section-label = false
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 2
+boost-paragraph = 1
+expand = true
+heading-split-level = 3
+
+[output.html.fold]
+enable = true
+level = 1
