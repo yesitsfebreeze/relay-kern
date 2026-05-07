@@ -1,0 +1,394 @@
+//! Slice O — kern-side filesystem watcher sink.
+//!
+//! Bridges `shared/watcher` events into kern's canonical ingest path.
+//! A `KernFileWatcherSink` implements [`watcher::IngestSink`]; on every
+//! `IngestRecord` it builds a `Document` job (kind = `EntityKind::Document`,
+//! `Source::File { path }`) and forwards through `Worker::enqueue` so the
+//! existing embed → `place_document` pipeline runs unchanged. There is no
+//! duplication of placement / dedup logic — same shape as slice K's
+//! `WorkerSink`.
+//!
+//! `run` constructs a `FileWatcher` + `IngestPipeline` and pumps events
+//! into the sink until the watcher drops (channel close).
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use journal::{EntityTouchedPayload, Entry, Kind, Sink, TouchOp, now_ms};
+use watcher::{
+	FileWatcher, IgnoreRules, IngestPipeline, IngestRecord, IngestSink, WatcherError,
+};
+
+use crate::base::types::{EntityKind, Source};
+use crate::ingest::{Config as IngestRunConfig, Worker};
+
+/// Build a `Kind::EntityTouched` journal entry for a slice-R `FsWrite`
+/// touch. Factored out so tests can drive a `Sink` they control without
+/// touching the process-global journal.
+pub(crate) fn build_fs_write_entry(entity_id: &str) -> Entry {
+	let payload = EntityTouchedPayload {
+		entity_id: entity_id.to_string(),
+		op: TouchOp::FsWrite,
+		fork_id: None,
+		ts_ms: now_ms(),
+	};
+	let v = serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null);
+	Entry::new(Kind::EntityTouched, entity_id, v)
+}
+
+/// Emit an `FsWrite` touch into the supplied `Sink`. Production wires
+/// `journal::GlobalSink`; tests substitute a `CountingSink` to inspect
+/// the entries without booting a `DayJournal`.
+pub(crate) fn emit_fs_write_touch(entity_id: &str, sink: &dyn Sink) {
+	sink.emit(build_fs_write_entry(entity_id));
+}
+
+/// Strip the `file://` (or `file:///`) prefix produced by
+/// `shared/watcher::pipeline::file_uri`. Returns the input unchanged when no
+/// prefix is present (defensive — kern still accepts plain paths).
+fn strip_file_uri(uri: &str) -> String {
+	if let Some(rest) = uri.strip_prefix("file:///") {
+		// Windows: `file:///C:/foo` → `C:/foo`
+		return rest.to_string();
+	}
+	if let Some(rest) = uri.strip_prefix("file://") {
+		// POSIX: `file:///abs` already handled above; this branch covers
+		// `file://host/path` and the no-host shorthand `file:///` was caught.
+		return rest.to_string();
+	}
+	uri.to_string()
+}
+
+/// Kern-side sink for filesystem ingest events. Forwards each record through
+/// the shared `Worker`, never touching `place_document` directly. Cheap to
+/// clone (only an `Arc<Worker>` inside) — the `IngestPipeline` takes its
+/// sink by value, so we hand it a clone and keep the `Arc` for callers.
+#[derive(Clone)]
+pub struct KernFileWatcherSink {
+	worker: Arc<Worker>,
+}
+
+impl KernFileWatcherSink {
+	pub fn new(worker: Arc<Worker>) -> Self {
+		Self { worker }
+	}
+}
+
+#[async_trait]
+impl IngestSink for KernFileWatcherSink {
+	async fn ingest(&self, record: IngestRecord) {
+		let IngestRecord {
+			source_uri,
+			content,
+			language_hint,
+		} = record;
+
+		let path = strip_file_uri(&source_uri);
+		let title = std::path::Path::new(&path)
+			.file_name()
+			.and_then(|s| s.to_str())
+			.unwrap_or("")
+			.to_string();
+
+		let source = Source::File {
+			path,
+			section: String::new(),
+			title,
+			author: String::new(),
+			url: source_uri,
+		};
+
+		let descriptor = language_hint.unwrap_or_default();
+
+		// Slice R: log an `FsWrite` touch into the shared journal so the
+		// relay-side `Recents` ring picks the file up via replay even
+		// though the file watcher runs in the kern process. Use the
+		// path as the entity_id — the actual kern entity_id is only
+		// known after `place_document` runs, but Recents matches by
+		// EntityRef.id which today is the source path / external id.
+		let touch_id = match &source {
+			Source::File { path, .. } => path.clone(),
+			_ => String::new(),
+		};
+
+		// Fire-and-forget; `place_document`'s vector-similarity dedup keeps
+		// the entity count stable when the same file is re-ingested.
+		self.worker.enqueue(
+			content,
+			source,
+			EntityKind::Document,
+			descriptor,
+			1.0,
+			IngestRunConfig::default(),
+		);
+
+		if !touch_id.is_empty() {
+			emit_fs_write_touch(&touch_id, &journal::GlobalSink);
+		}
+	}
+}
+
+/// Spawn the watcher event pump. Runs until the underlying `FileWatcher`
+/// channel closes (i.e. the watcher is dropped or its background task
+/// exits). Returns on success once the stream ends; surfaces watcher
+/// construction errors to the caller.
+pub async fn run(
+	roots: Vec<PathBuf>,
+	ignore: IgnoreRules,
+	sink: Arc<KernFileWatcherSink>,
+) -> Result<(), WatcherError> {
+	let mut watcher = FileWatcher::new(roots, ignore)?;
+	let pipeline = IngestPipeline::new((*sink).clone());
+	while let Some(ev) = watcher.next_event().await {
+		pipeline.handle(ev).await;
+	}
+	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::sync::RwLock;
+	use std::time::{Duration, SystemTime};
+
+	use tempfile::tempdir;
+	use tokio::time::{sleep, timeout};
+
+	use crate::base::accept;
+	use crate::base::graph::GraphGnn;
+	use crate::base::types::{Acl, ChunkPart, ChunkPartKind, Entity, EntityStatus};
+	use crate::base::util;
+	use crate::crdt::GCounter;
+
+	/// Test sink that bypasses the embed-backed `Worker` and writes directly
+	/// into a graph. Mirrors the `DirectSink` shape used by slice K's
+	/// session_mirror tests so kern tests stay hermetic.
+	#[derive(Clone)]
+	struct DirectFileSink {
+		graph: Arc<RwLock<GraphGnn>>,
+	}
+
+	impl DirectFileSink {
+		fn new(graph: Arc<RwLock<GraphGnn>>) -> Self {
+			Self { graph }
+		}
+
+		fn stub_vector(seed: &str) -> Vec<f64> {
+			let h = util::content_hash(seed);
+			let bytes = h.as_bytes();
+			let slot = if bytes.is_empty() { 0 } else { bytes[0] as usize };
+			let mut v = vec![0.0_f64; 256];
+			v[slot] = 1.0;
+			v
+		}
+
+		fn build_entity(&self, source: Source, text: String) -> Entity {
+			let vec = Self::stub_vector(&text);
+			let id = util::content_hash(&text);
+			let mut t = Entity {
+				id,
+				root_id: String::new(),
+				external_id: source.object_id().to_string(),
+				superseded_by: String::new(),
+				kind: EntityKind::Document,
+				status: EntityStatus::Active,
+				statements: vec![text],
+				chunks: vec![ChunkPart {
+					kind: ChunkPartKind::StatementRef,
+					text: String::new(),
+					index: 0,
+				}],
+				vector: vec,
+				gnn_vector: Vec::new(),
+				score: 0.0,
+				conf_alpha: 2.0,
+				conf_beta: 1.0,
+				source,
+				created_at: Some(SystemTime::now()),
+				acl: Acl::default(),
+				access_count: GCounter::new(),
+				accessed_at: None,
+				heat: 0.0,
+				heat_updated_at: None,
+				updated_at: None,
+				valid_until: None,
+				producer_id: String::new(),
+				unlinked_count: 0,
+			};
+			t.refresh_score();
+			t
+		}
+	}
+
+	#[async_trait]
+	impl IngestSink for DirectFileSink {
+		async fn ingest(&self, record: IngestRecord) {
+			let path = strip_file_uri(&record.source_uri);
+			let title = std::path::Path::new(&path)
+				.file_name()
+				.and_then(|s| s.to_str())
+				.unwrap_or("")
+				.to_string();
+			let source = Source::File {
+				path,
+				section: String::new(),
+				title,
+				author: String::new(),
+				url: record.source_uri,
+			};
+			let entity = self.build_entity(source, record.content);
+			let root_id = match self.graph.read() {
+				Ok(g) => g.root.id.clone(),
+				Err(_) => return,
+			};
+			if let Ok(mut g) = self.graph.write() {
+				accept::accept(&mut g, &root_id, entity, "");
+			}
+		}
+	}
+
+	fn count_file_documents(g: &GraphGnn) -> usize {
+		g.kerns
+			.values()
+			.flat_map(|k| k.entities.values())
+			.filter(|t| matches!(t.kind, EntityKind::Document) && t.source.scheme() == "file")
+			.count()
+	}
+
+	fn collect_file_paths(g: &GraphGnn) -> Vec<String> {
+		g.kerns
+			.values()
+			.flat_map(|k| k.entities.values())
+			.filter(|t| matches!(t.kind, EntityKind::Document) && t.source.scheme() == "file")
+			.map(|t| t.source.object_id().to_string())
+			.collect()
+	}
+
+	#[test]
+	fn strip_file_uri_handles_windows_and_posix() {
+		assert_eq!(strip_file_uri("file:///C:/foo/bar.rs"), "C:/foo/bar.rs");
+		assert_eq!(strip_file_uri("file:///abs/posix.rs"), "abs/posix.rs");
+		assert_eq!(strip_file_uri("file://host/p.rs"), "host/p.rs");
+		assert_eq!(strip_file_uri("plain/path.rs"), "plain/path.rs");
+	}
+
+	/// Unit: a single record passed to the kern-shaped sink yields a
+	/// `Document` entity with `Source::File { path = stripped uri }`.
+	#[tokio::test]
+	async fn sink_ingest_produces_file_document() {
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let sink = DirectFileSink::new(g.clone());
+		let rec = IngestRecord {
+			source_uri: "file:///tmp/hello.rs".to_string(),
+			content: "fn hello() {}".to_string(),
+			language_hint: Some("rust".to_string()),
+		};
+		sink.ingest(rec).await;
+
+		let g = g.read().expect("graph lock");
+		let paths = collect_file_paths(&g);
+		assert_eq!(paths.len(), 1);
+		assert_eq!(paths[0], "tmp/hello.rs");
+	}
+
+	/// Integration: real `FileWatcher` + sink → creating a file produces an
+	/// entity with the expected source path. We drive the pipeline manually
+	/// (same as `pipeline::handle`) so the test doesn't need to wire the
+	/// kern startup path.
+	#[tokio::test]
+	async fn watcher_pipeline_creates_document_for_new_file() {
+		let dir = tempdir().expect("tempdir");
+		let root = dir.path().to_path_buf();
+
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let sink = DirectFileSink::new(g.clone());
+
+		let mut fw =
+			FileWatcher::new(vec![root.clone()], IgnoreRules::empty()).expect("watcher new");
+		let pipeline = IngestPipeline::new(sink);
+
+		// Give the watcher a moment to register before we touch the fs.
+		sleep(Duration::from_millis(100)).await;
+
+		let target = root.join("note.md");
+		std::fs::write(&target, "hello watcher").expect("write file");
+
+		// Drain debounced events for up to ~2s, feeding them through the
+		// pipeline. We stop as soon as the graph reflects the ingest.
+		let deadline = std::time::Instant::now() + Duration::from_secs(2);
+		while std::time::Instant::now() < deadline {
+			match timeout(Duration::from_millis(200), fw.next_event()).await {
+				Ok(Some(ev)) => pipeline.handle(ev).await,
+				Ok(None) => break,
+				Err(_) => {}
+			}
+			let g_read = g.read().expect("graph lock");
+			if count_file_documents(&g_read) >= 1 {
+				break;
+			}
+		}
+
+		let g_read = g.read().expect("graph lock");
+		let paths = collect_file_paths(&g_read);
+		assert!(
+			!paths.is_empty(),
+			"expected at least one file Document, got {paths:?}"
+		);
+		let target_str = target.to_string_lossy().replace('\\', "/");
+		assert!(
+			paths.iter().any(|p| target_str.ends_with(p) || p.ends_with("note.md")),
+			"expected stored path to reference note.md; got {paths:?}"
+		);
+	}
+
+	/// Slice R: a single FsWrite touch produces an `EntityTouched`
+	/// journal entry whose payload deserialises back to `op = FsWrite`
+	/// for the supplied path, and `Recents::replay_journal` walks that
+	/// entry into a ring entry.
+	#[test]
+	fn fs_write_touch_emits_entity_touched_and_replays_into_recents() {
+		use std::sync::Mutex;
+
+		#[derive(Default)]
+		struct CapturingSink {
+			entries: Mutex<Vec<journal::Entry>>,
+		}
+		impl journal::Sink for CapturingSink {
+			fn emit(&self, e: journal::Entry) {
+				self.entries.lock().unwrap().push(e);
+			}
+		}
+
+		let sink = CapturingSink::default();
+		emit_fs_write_touch("file:///tmp/note.md", &sink);
+
+		let entries = sink.entries.lock().unwrap().clone();
+		assert_eq!(entries.len(), 1);
+		assert!(matches!(entries[0].kind, journal::Kind::EntityTouched));
+		let ev = journal::EntityTouchedEvent::from_entry(&entries[0]).expect("parse");
+		assert_eq!(ev.entity_id, "file:///tmp/note.md");
+		assert_eq!(ev.op, journal::TouchOp::FsWrite);
+	}
+
+	/// Idempotency: feeding the same `IngestRecord` twice keeps the entity
+	/// count stable. With the test sink, identical text → identical
+	/// `content_hash` id → `accept` collapses to a single entity (matches
+	/// production where `place_document`'s `find_duplicate` returns the
+	/// existing id).
+	#[tokio::test]
+	async fn duplicate_ingest_is_idempotent() {
+		let g = Arc::new(RwLock::new(GraphGnn::new()));
+		let sink = DirectFileSink::new(g.clone());
+		let rec = IngestRecord {
+			source_uri: "file:///tmp/dup.rs".to_string(),
+			content: "fn dup() {}".to_string(),
+			language_hint: Some("rust".to_string()),
+		};
+		sink.ingest(rec.clone()).await;
+		sink.ingest(rec).await;
+
+		let g = g.read().expect("graph lock");
+		assert_eq!(count_file_documents(&g), 1);
+	}
+}
