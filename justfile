@@ -48,7 +48,11 @@ kill:
     -pkill -f kern
 
 docs:
+    cargo run --manifest-path {{justfile_directory()}}/../shared/Cargo.toml -p doc-gen -- --workspace {{justfile_directory()}} --out {{justfile_directory()}}/docs/book/src
     mdbook build docs/book
+
+docs-watch:
+    cargo run --manifest-path {{justfile_directory()}}/../shared/Cargo.toml -p doc-gen -- --workspace {{justfile_directory()}} --out {{justfile_directory()}}/docs/book/src --watch
 
 docs-serve:
     mdbook serve docs/book
