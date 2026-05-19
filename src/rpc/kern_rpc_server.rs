@@ -21,9 +21,10 @@ use std::sync::{Arc, Mutex as StdMutex};
 use journal::{EntityTouchedPayload, Entry, Kind, Sink, TouchOp, now_ms};
 use serde_json::Value;
 use trnsprt::kern_rpc::{
-    EdgeKind, EntityKindLite, EntityRef, EntityStatusLite, IngestReq, IngestRes, KernRpc, LinkReq,
-    LinkRes, NeighborsReq, NeighborsRes, QueryReq, QueryRes, SourceLite, TruncateAfterReq,
-    TruncateAfterRes,
+    DegradeReq, DegradeRes, DescriptorReq, DescriptorRes, EdgeKind, EntityKindLite, EntityRef,
+    EntityStatusLite, ForgetReq, ForgetRes, HealthRes, IngestReq, IngestRes, KernRpc, LinkReq,
+    LinkRes, NeighborsReq, NeighborsRes, PulseReq, PulseRes, PurposeReq, PurposeRes, QueryReq,
+    QueryRes, SourceLite, TruncateAfterReq, TruncateAfterRes,
 };
 use trnsprt::typed::{Channel, JsonEnvelopeCodec, TcpAdapter};
 
@@ -484,6 +485,88 @@ impl KernRpc for KernRpcHandler {
             let dropped = svc.truncate_after(req.ts_ms);
             tracing::debug!(target: "kern.kern_rpc", dropped, ts_ms = req.ts_ms, "truncate_after");
             TruncateAfterRes {}
+        }
+    }
+
+    fn forget(&self, req: ForgetReq) -> impl ::core::future::Future<Output = ForgetRes> + Send {
+        let kern = self.kern.clone();
+        async move {
+            let args = serde_json::json!({ "id": req.id });
+            let env = kern.tool_forget(&args);
+            // tool_forget emits only `removed_edges` on success; success-implies-removed.
+            let removed = unwrap_tool_json(&env).is_ok();
+            ForgetRes { removed }
+        }
+    }
+
+    fn degrade(&self, req: DegradeReq) -> impl ::core::future::Future<Output = DegradeRes> + Send {
+        let kern = self.kern.clone();
+        async move {
+            // Preserve legacy memory_rpc id → query_id remap for tool_degrade.
+            let args = serde_json::json!({ "query_id": req.id });
+            let env = kern.tool_degrade(&args);
+            // tool_degrade emits only `decayed_edges`; success-implies-applied.
+            let applied = unwrap_tool_json(&env).is_ok();
+            DegradeRes { applied }
+        }
+    }
+
+    fn health(&self) -> impl ::core::future::Future<Output = HealthRes> + Send {
+        let kern = self.kern.clone();
+        async move {
+            let env = kern.tool_health();
+            let payload = match unwrap_tool_json(&env) {
+                Ok(v) => v,
+                Err(_) => return HealthRes::default(),
+            };
+            let kerns = payload.get("kerns").and_then(|v| v.as_u64()).unwrap_or(0);
+            let entities = payload.get("entities").and_then(|v| v.as_u64()).unwrap_or(0);
+            // health_stats has no data_dir field; default to empty.
+            let data_dir = payload
+                .get("data_dir")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            HealthRes {
+                ok: true,
+                data_dir,
+                kerns,
+                entities,
+            }
+        }
+    }
+
+    fn purpose(&self, req: PurposeReq) -> impl ::core::future::Future<Output = PurposeRes> + Send {
+        let kern = self.kern.clone();
+        async move {
+            let args = serde_json::json!({ "text": req.text });
+            let _ = kern.tool_purpose(&args);
+            PurposeRes::default()
+        }
+    }
+
+    fn descriptor(
+        &self,
+        req: DescriptorReq,
+    ) -> impl ::core::future::Future<Output = DescriptorRes> + Send {
+        let kern = self.kern.clone();
+        async move {
+            let args = serde_json::json!({
+                "action": req.action,
+                "name": req.name,
+                "description": req.description,
+            });
+            let _ = kern.tool_descriptor(&args);
+            DescriptorRes::default()
+        }
+    }
+
+    fn pulse(&self, req: PulseReq) -> impl ::core::future::Future<Output = PulseRes> + Send {
+        let kern = self.kern.clone();
+        async move {
+            let args = serde_json::json!({ "strength": req.strength });
+            let _ = kern.tool_pulse(&args);
+            PulseRes::default()
         }
     }
 }
