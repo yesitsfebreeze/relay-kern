@@ -4,7 +4,7 @@ mod ingest_cmd;
 mod mcp_cmd;
 mod query;
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
@@ -387,7 +387,6 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	if let Some(j) = journal::global() {
 		j.set_max_bytes(cfg.journal.max_today_bytes);
 	}
-	let g = Arc::new(RwLock::new(load_graph(cfg)));
 	let llm_client = build_llm(
 		&cli.embed_url,
 		&cli.embed_model,
@@ -397,24 +396,42 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		cfg.reason_key(),
 	);
 
-	let q = Arc::new(crate::tick::queue::Queue::new(cfg.tick.queue_capacity.max(1)));
-
-	let save_g = g.clone();
-	let save_fn: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-		let g = read_recovered(&save_g);
-		save_graph(&g);
-	});
 	let llm_fn: Option<crate::ingest::LlmFunc> = if !cli.reason_url.is_empty() {
 		Some(Arc::new(llm_client.complete_func()))
 	} else {
 		None
 	};
-	let worker = Arc::new(crate::ingest::Worker::new(
-		g.clone(),
+
+	let tick_llm: crate::tick::tasks::LlmFunc = Arc::new(llm_client.complete_func());
+	let tick_embed: crate::tick::tasks::EmbedFunc = {
+		let c = llm_client.clone();
+		Arc::new(move |text: &str| -> Result<Vec<f64>, String> {
+			let c = c.clone();
+			let text = text.to_string();
+			match tokio::runtime::Handle::try_current() {
+				Ok(h) => {
+					let result = std::thread::scope(|_| h.block_on(c.embed(&text)));
+					result.map_err(|e: crate::llm::LlmError| e.to_string())
+				}
+				Err(_) => Err("no runtime".to_string()),
+			}
+		})
+	};
+
+	let registry = Arc::new(crate::store::Registry::new());
+	let entry = registry.open(
+		std::path::Path::new(&cfg.data_dir),
+		cfg,
 		llm_client.clone(),
-		llm_fn,
-		Some(save_fn.clone()),
-	));
+		llm_fn.clone(),
+		Some(tick_llm),
+		Some(tick_embed),
+		None,
+	);
+	let g = entry.graph.clone();
+	let worker = entry.worker.clone();
+	let q = entry.tick_q.clone();
+	let save_fn = entry.save_fn.clone();
 
 	// Slice K — session mirror. Tails the shared journal `fork_*`
 	// lifecycle events and ingests each new fork as a `Document` entity
@@ -473,33 +490,6 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 			}
 		});
 	}
-
-	let tick_llm: crate::tick::tasks::LlmFunc = Arc::new(llm_client.complete_func());
-	let tick_embed: crate::tick::tasks::EmbedFunc = {
-		let c = llm_client.clone();
-		Arc::new(move |text: &str| -> Result<Vec<f64>, String> {
-			let c = c.clone();
-			let text = text.to_string();
-			match tokio::runtime::Handle::try_current() {
-				Ok(h) => {
-					let result = std::thread::scope(|_| h.block_on(c.embed(&text)));
-					result.map_err(|e: crate::llm::LlmError| e.to_string())
-				}
-				Err(_) => Err("no runtime".to_string()),
-			}
-		})
-	};
-	crate::tick::start(
-		q.clone(),
-		g.clone(),
-		Some(tick_llm),
-		Some(tick_embed),
-		None,
-		cfg.gnn.into(),
-		cfg.tick,
-	);
-
-	crate::tick::enqueue_all(&q, &g);
 
 	let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 	tokio::spawn(async move {

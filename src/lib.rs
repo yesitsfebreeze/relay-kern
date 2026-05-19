@@ -41,6 +41,8 @@ pub mod repl;
 pub mod retrieval;
 /// Typed RPC service layer consumed by relay and agnt.
 pub mod rpc;
+/// Per-data-dir store registry for multi-tenant kern instances.
+pub mod store;
 /// Periodic background task scheduler.
 pub mod tick;
 /// Shared domain types used across kern modules.
