@@ -506,88 +506,20 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		cfg: Arc::new(cfg.clone()),
 	});
 
-	// Phase 1 typed-RPC listener (additive). Binds an ephemeral TCP port,
-	// publishes it to `.relay/kern_memory.port` for agnt to discover, and
-	// serves `MemoryRpc` requests via the new `Channel<JsonEnvelopeCodec>`
-	// stack. Independent of MCP — runs whether or not stdio/SSE are used.
-	// `MemoryHandler` is wired to the same `mcp::Server` the MCP listener
-	// uses, so both paths invoke identical kern internals.
+	// Slice J typed-RPC: KernRpc listener publishes `.relay/kern_rpc.port`
+	// and owns the in-memory `MemoryService` used by `truncate_after`.
 	{
 		let mem = Arc::new(std::sync::Mutex::new(crate::memory_service::MemoryService::new()));
 
-		// Slice J typed-RPC: KernRpc is a sibling listener to MemoryRpc,
-		// publishing `.relay/kern_rpc.port`. Shares the in-memory store
-		// with MemoryRpc so `truncate_after` is consistent across both
-		// surfaces. Independent accept loop so neither service blocks
-		// the other.
-		{
-			let kern_handle = mcp_server.clone();
-			let mem = mem.clone();
-			tokio::spawn(async move {
-				let handler = crate::rpc::KernRpcHandler::new(kern_handle, mem);
-				let dir = std::path::Path::new(".relay");
-				match crate::rpc::kern_rpc_listen(handler, dir).await {
-					Ok(_join) => {}
-					Err(e) => {
-						tracing::warn!(target: "kern.kern_rpc", error = %e, "listen failed");
-					}
-				}
-			});
-		}
-
 		let kern_handle = mcp_server.clone();
 		tokio::spawn(async move {
-			let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
-				Ok(l) => l,
-				Err(e) => {
-					tracing::warn!(target: "kern.memory_rpc", error = %e, "bind failed");
-					return;
-				}
-			};
-			let port = match listener.local_addr() {
-				Ok(a) => a.port(),
-				Err(e) => {
-					tracing::warn!(target: "kern.memory_rpc", error = %e, "local_addr");
-					return;
-				}
-			};
+			let handler = crate::rpc::KernRpcHandler::new(kern_handle, mem);
 			let dir = std::path::Path::new(".relay");
-			if let Err(e) = std::fs::create_dir_all(dir) {
-				tracing::warn!(target: "kern.memory_rpc", error = %e, "mkdir .relay");
-				return;
-			}
-			let final_path = dir.join("kern_memory.port");
-			let tmp_path = dir.join("kern_memory.port.tmp");
-			if let Err(e) = std::fs::write(&tmp_path, port.to_string()) {
-				tracing::warn!(target: "kern.memory_rpc", error = %e, "write port tmp");
-				return;
-			}
-			if let Err(e) = std::fs::rename(&tmp_path, &final_path) {
-				tracing::warn!(target: "kern.memory_rpc", error = %e, "rename port");
-				return;
-			}
-			tracing::info!(target: "kern.memory_rpc", port, "listening");
-			loop {
-				let (stream, _peer) = match listener.accept().await {
-					Ok(p) => p,
-					Err(e) => {
-						tracing::warn!(target: "kern.memory_rpc", error = %e, "accept");
-						continue;
-					}
-				};
-				let mem = mem.clone();
-				let kern_handle = kern_handle.clone();
-				tokio::spawn(async move {
-					let adapter = trnsprt::typed::TcpAdapter::new(stream);
-					let channel = trnsprt::typed::Channel::new(
-						adapter,
-						trnsprt::typed::JsonEnvelopeCodec::new(),
-					);
-					let handler = crate::memory_service::MemoryHandler::new(mem, kern_handle);
-					if let Err(e) = protocol::memory::serve_memory_rpc(channel, handler).await {
-						tracing::warn!(target: "kern.memory_rpc", error = %e, "serve loop");
-					}
-				});
+			match crate::rpc::kern_rpc_listen(handler, dir).await {
+				Ok(_join) => {}
+				Err(e) => {
+					tracing::warn!(target: "kern.kern_rpc", error = %e, "listen failed");
+				}
 			}
 		});
 	}
