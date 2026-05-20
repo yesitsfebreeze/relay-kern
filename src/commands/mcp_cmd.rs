@@ -18,7 +18,7 @@ use std::sync::RwLock as StdRwLock;
 
 use tokio::sync::Mutex as TokioMutex;
 use trnsprt::kern_rpc::{CallToolReq, KernRpcClient};
-use trnsprt::typed::JsonEnvelopeCodec;
+use trnsprt::typed::{AdapterError, JsonEnvelopeCodec};
 use trnsprt::{McpError, McpServer, ToolResult, ToolSchema};
 
 use crate::base::locks::read_recovered;
@@ -26,35 +26,120 @@ use crate::base::locks::read_recovered;
 use super::{load_graph, save_graph};
 
 pub(super) async fn cmd_mcp(cfg: &crate::config::Config) {
-	match KernRpcClient::<JsonEnvelopeCodec>::connect_local().await {
+	// First attach attempt — short retry catches the "daemon up but
+	// slow to respond" race.
+	match attach_with_retry(2, 150).await {
 		Ok(client) => {
-			tracing::info!(
-				target: "kern.mcp_proxy",
-				"attached to running daemon — proxy mode"
-			);
-			let proxy = ProxyServer {
-				client: Arc::new(TokioMutex::new(client)),
-			};
-			// `serve_stdio` is sync (BufRead/Write on stdin/stdout). Run
-			// it on a blocking thread so it doesn't park a runtime worker.
-			// Each `call_tool` invocation crosses back into async via
-			// `block_in_place` + `Handle::current().block_on`, which is
-			// supported on the multi-thread runtime kern uses.
-			if let Err(e) =
-				tokio::task::spawn_blocking(move || trnsprt::serve_stdio(&proxy)).await
-			{
-				tracing::warn!(target: "kern.mcp_proxy", error = %e, "stdio loop");
-			}
+			run_proxy(client).await;
 		}
-		Err(e) => {
+		Err(e_first) => {
 			tracing::info!(
 				target: "kern.mcp",
-				error = %e,
-				"no daemon at kern.sock — standalone mode"
+				error = %e_first,
+				"no daemon at kern.sock — auto-spawning detached daemon"
 			);
-			run_standalone(cfg).await;
+			match spawn_daemon() {
+				Ok(()) => match attach_with_retry(6, 150).await {
+					Ok(client) => {
+						tracing::info!(
+							target: "kern.mcp_proxy",
+							"attached to auto-spawned daemon — proxy mode"
+						);
+						run_proxy(client).await;
+					}
+					Err(e_retry) => {
+						tracing::warn!(
+							target: "kern.mcp",
+							error = %e_retry,
+							"auto-spawn failed, falling back to standalone"
+						);
+						run_standalone(cfg).await;
+					}
+				},
+				Err(e_spawn) => {
+					tracing::warn!(
+						target: "kern.mcp",
+						error = %e_spawn,
+						"auto-spawn failed, falling back to standalone"
+					);
+					run_standalone(cfg).await;
+				}
+			}
 		}
 	}
+}
+
+async fn run_proxy(client: KernRpcClient<JsonEnvelopeCodec>) {
+	tracing::info!(
+		target: "kern.mcp_proxy",
+		"attached to running daemon — proxy mode"
+	);
+	let proxy = ProxyServer {
+		client: Arc::new(TokioMutex::new(client)),
+	};
+	// `serve_stdio` is sync (BufRead/Write on stdin/stdout). Run
+	// it on a blocking thread so it doesn't park a runtime worker.
+	// Each `call_tool` invocation crosses back into async via
+	// `block_in_place` + `Handle::current().block_on`, which is
+	// supported on the multi-thread runtime kern uses.
+	if let Err(e) = tokio::task::spawn_blocking(move || trnsprt::serve_stdio(&proxy)).await
+	{
+		tracing::warn!(target: "kern.mcp_proxy", error = %e, "stdio loop");
+	}
+}
+
+async fn attach_with_retry(
+	retries: u32,
+	delay_ms: u64,
+) -> Result<KernRpcClient<JsonEnvelopeCodec>, AdapterError> {
+	let mut last_err: Option<AdapterError> = None;
+	for i in 0..retries {
+		match KernRpcClient::<JsonEnvelopeCodec>::connect_local().await {
+			Ok(c) => return Ok(c),
+			Err(e) => {
+				last_err = Some(e);
+				if i + 1 < retries {
+					tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+				}
+			}
+		}
+	}
+	Err(last_err.unwrap_or_else(|| AdapterError::Other("no attempts".into())))
+}
+
+#[cfg(windows)]
+fn spawn_daemon() -> std::io::Result<()> {
+	use std::os::windows::process::CommandExt;
+	use std::process::{Command, Stdio};
+	// DETACHED_PROCESS = 0x00000008, CREATE_NEW_PROCESS_GROUP = 0x00000200
+	const DETACHED_PROCESS: u32 = 0x0000_0008;
+	const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+	let exe = std::env::current_exe()?;
+	let _child = Command::new(exe)
+		.arg("--daemon")
+		.stdin(Stdio::null())
+		.stdout(Stdio::null())
+		.stderr(Stdio::null())
+		.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+		.spawn()?;
+	// Drop child handle — detach flags + null stdio keep it alive past
+	// our exit.
+	Ok(())
+}
+
+#[cfg(unix)]
+fn spawn_daemon() -> std::io::Result<()> {
+	use std::os::unix::process::CommandExt;
+	use std::process::{Command, Stdio};
+	let exe = std::env::current_exe()?;
+	let _child = Command::new(exe)
+		.arg("--daemon")
+		.stdin(Stdio::null())
+		.stdout(Stdio::null())
+		.stderr(Stdio::null())
+		.process_group(0)
+		.spawn()?;
+	Ok(())
 }
 
 // ---- Proxy ---------------------------------------------------------------
