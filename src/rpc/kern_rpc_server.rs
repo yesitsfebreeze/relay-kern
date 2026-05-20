@@ -15,7 +15,6 @@
 //! `fork_at` is **not** part of `KernRpc` — see the rationale in
 //! `trnsprt::kern_rpc::mod` and the slice-J report.
 
-use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use journal::{EntityTouchedPayload, Entry, Kind, Sink, TouchOp, now_ms};
@@ -26,7 +25,7 @@ use trnsprt::kern_rpc::{
     LinkRes, NeighborsReq, NeighborsRes, PulseReq, PulseRes, PurposeReq, PurposeRes, QueryReq,
     QueryRes, SourceLite, TruncateAfterReq, TruncateAfterRes,
 };
-use trnsprt::typed::{Channel, JsonEnvelopeCodec, TcpAdapter};
+use trnsprt::typed::{Channel, JsonEnvelopeCodec, LocalListener};
 
 use crate::base::types::EntityKind;
 use crate::memory_service::MemoryService;
@@ -610,48 +609,32 @@ fn lookup_kind_scheme_status(
 
 // ---- listener -------------------------------------------------------------
 
-/// Spawn a TCP listener that publishes its ephemeral port to
-/// `<port_dir>/kern_rpc.port` and serves `KernRpc` requests via the
-/// JSON-envelope codec. Mirrors the existing `kern_memory.port`
-/// pattern.
+/// Accept loop over a pre-bound [`LocalListener`]. Caller (run_server)
+/// owns the singleton-aware bind so it can react to `BindOutcome::
+/// AlreadyRunning` by exiting 0 before any other daemon scaffolding
+/// spins up.
 ///
-/// Returns immediately after spawning. The returned `JoinHandle` runs
-/// the accept loop; tests use it to await server shutdown.
-pub async fn kern_rpc_listen(
-    handler: KernRpcHandler,
-    port_dir: &Path,
-) -> std::io::Result<tokio::task::JoinHandle<()>> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    std::fs::create_dir_all(port_dir)?;
-    let final_path = port_dir.join("kern_rpc.port");
-    let tmp_path = port_dir.join("kern_rpc.port.tmp");
-    std::fs::write(&tmp_path, port.to_string())?;
-    std::fs::rename(&tmp_path, &final_path)?;
-    tracing::info!(target: "kern.kern_rpc", port, "listening");
-
-    let join = tokio::spawn(async move {
-        loop {
-            let (stream, _peer) = match listener.accept().await {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(target: "kern.kern_rpc", error = %e, "accept");
-                    continue;
-                }
-            };
-            let handler = handler.clone();
-            tokio::spawn(async move {
-                let adapter = TcpAdapter::new(stream);
-                let channel = Channel::new(adapter, JsonEnvelopeCodec::new());
-                if let Err(e) =
-                    trnsprt::kern_rpc::serve_kern_rpc(channel, handler).await
-                {
-                    tracing::warn!(target: "kern.kern_rpc", error = %e, "serve loop");
-                }
-            });
-        }
-    });
-    Ok(join)
+/// Per accept: spawn a task that wraps the local-socket adapter in a
+/// JSON-envelope `Channel` and runs the generated `serve_kern_rpc`
+/// service loop. Errors on a single connection are logged; they do not
+/// take the listener down.
+pub async fn serve_kern_rpc_loop(mut listener: LocalListener, handler: KernRpcHandler) {
+    loop {
+        let adapter = match listener.accept().await {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(target: "kern.kern_rpc", error = %e, "accept");
+                continue;
+            }
+        };
+        let handler = handler.clone();
+        tokio::spawn(async move {
+            let channel = Channel::new(adapter, JsonEnvelopeCodec::new());
+            if let Err(e) = trnsprt::kern_rpc::serve_kern_rpc(channel, handler).await {
+                tracing::warn!(target: "kern.kern_rpc", error = %e, "serve loop");
+            }
+        });
+    }
 }
 
 #[cfg(test)]

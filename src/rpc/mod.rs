@@ -1,11 +1,9 @@
 //! Typed-RPC server modules.
 //!
-//! Sibling to [`crate::memory_service::MemoryHandler`]. Where
-//! `MemoryHandler` implements the legacy `protocol::memory::MemoryRpc`
-//! trait, the modules here implement the slice-J `trnsprt::kern_rpc`
-//! surface — the typed read+write API consumed by sub-agents and the
-//! relay TUI.
+//! Implements the `trnsprt::kern_rpc` surface — the typed read+write API
+//! consumed by sub-agents and the relay TUI. Bound to the per-user
+//! `kern.sock` singleton endpoint via `trnsprt::typed::LocalListener`.
 
 pub mod kern_rpc_server;
 
-pub use kern_rpc_server::{kern_rpc_listen, KernRpcHandler};
+pub use kern_rpc_server::{serve_kern_rpc_loop, KernRpcHandler};

@@ -506,22 +506,37 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		cfg: Arc::new(cfg.clone()),
 	});
 
-	// Slice J typed-RPC: KernRpc listener publishes `.relay/kern_rpc.port`
-	// and owns the in-memory `MemoryService` used by `truncate_after`.
+	// Singleton kern_rpc surface on the per-user `kern.sock` endpoint.
+	// Bound synchronously here so an `AlreadyRunning` outcome (another
+	// daemon owns the endpoint) can short-circuit run_server before any
+	// other daemon scaffolding spins up. The accept loop runs in a
+	// detached task; this function returns when ctrl-c arrives (daemon
+	// mode) or when the repl exits (interactive mode).
 	{
 		let mem = Arc::new(std::sync::Mutex::new(crate::memory_service::MemoryService::new()));
-
-		let kern_handle = mcp_server.clone();
-		tokio::spawn(async move {
-			let handler = crate::rpc::KernRpcHandler::new(kern_handle, mem);
-			let dir = std::path::Path::new(".relay");
-			match crate::rpc::kern_rpc_listen(handler, dir).await {
-				Ok(_join) => {}
-				Err(e) => {
-					tracing::warn!(target: "kern.kern_rpc", error = %e, "listen failed");
-				}
+		let handler = crate::rpc::KernRpcHandler::new(mcp_server.clone(), mem);
+		let endpoint = trnsprt::typed::Endpoint::kern();
+		match trnsprt::typed::bind_kern_listener(&endpoint).await {
+			Ok(trnsprt::typed::BindOutcome::Bound(listener)) => {
+				tracing::info!(
+					target: "kern.kern_rpc",
+					endpoint = %endpoint.display(),
+					"listening"
+				);
+				tokio::spawn(crate::rpc::serve_kern_rpc_loop(listener, handler));
 			}
-		});
+			Ok(trnsprt::typed::BindOutcome::AlreadyRunning) => {
+				eprintln!(
+					"kern: another daemon already running at {} — exiting",
+					endpoint.display()
+				);
+				return;
+			}
+			Err(e) => {
+				tracing::error!(target: "kern.kern_rpc", error = %e, "bind failed");
+				return;
+			}
+		}
 	}
 
 	if cli.mcp_stdio {
