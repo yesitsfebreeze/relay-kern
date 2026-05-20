@@ -20,12 +20,13 @@ use std::sync::{Arc, Mutex as StdMutex};
 use journal::{EntityTouchedPayload, Entry, Kind, Sink, TouchOp, now_ms};
 use serde_json::Value;
 use trnsprt::kern_rpc::{
-    DegradeReq, DegradeRes, DescriptorReq, DescriptorRes, EdgeKind, EntityKindLite, EntityRef,
-    EntityStatusLite, ForgetReq, ForgetRes, HealthRes, IngestReq, IngestRes, KernRpc, LinkReq,
-    LinkRes, NeighborsReq, NeighborsRes, PulseReq, PulseRes, PurposeReq, PurposeRes, QueryReq,
-    QueryRes, SourceLite, TruncateAfterReq, TruncateAfterRes,
+    CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq, DescriptorRes, EdgeKind,
+    EntityKindLite, EntityRef, EntityStatusLite, ForgetReq, ForgetRes, HealthRes, IngestReq,
+    IngestRes, KernRpc, LinkReq, LinkRes, NeighborsReq, NeighborsRes, PulseReq, PulseRes,
+    PurposeReq, PurposeRes, QueryReq, QueryRes, SourceLite, TruncateAfterReq, TruncateAfterRes,
 };
 use trnsprt::typed::{Channel, JsonEnvelopeCodec, LocalListener};
+use trnsprt::McpServer;
 
 use crate::base::types::EntityKind;
 use crate::memory_service::MemoryService;
@@ -566,6 +567,32 @@ impl KernRpc for KernRpcHandler {
             let args = serde_json::json!({ "strength": req.strength });
             let _ = kern.tool_pulse(&args);
             PulseRes::default()
+        }
+    }
+
+    fn call_tool(
+        &self,
+        req: CallToolReq,
+    ) -> impl ::core::future::Future<Output = CallToolRes> + Send {
+        let kern = self.kern.clone();
+        async move {
+            // Forward to the existing MCP `call_tool` dispatcher so the
+            // proxy in `kern mcp` can relay any stdio MCP `tools/call`
+            // request over kern.sock without enumerating every tool.
+            let envelope = match McpServer::call_tool(&*kern, &req.name, &req.args) {
+                Ok(tr) => serde_json::json!({
+                    "content": tr.content,
+                    "isError": tr.is_error,
+                }),
+                Err(e) => serde_json::json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("kern_rpc::call_tool: {e}"),
+                    }],
+                    "isError": true,
+                }),
+            };
+            CallToolRes { envelope }
         }
     }
 }
