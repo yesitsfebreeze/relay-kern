@@ -207,6 +207,46 @@ impl Server {
 	}
 }
 
+fn entity_detail(
+	thought: &crate::base::types::Entity,
+	kern_id: &str,
+	g: &crate::base::graph::GraphGnn,
+) -> serde_json::Value {
+	let mut edges = Vec::new();
+	if let Some(kern) = g.kerns.get(kern_id) {
+		let mut rids = Vec::new();
+		if let Some(from_list) = kern.by_from.get(&thought.id) {
+			rids.extend(from_list.iter().cloned());
+		}
+		if let Some(to_list) = kern.by_to.get(&thought.id) {
+			rids.extend(to_list.iter().cloned());
+		}
+		for rid in &rids {
+			if let Some(re) = kern.reasons.get(rid) {
+				edges.push(serde_json::json!({
+					"id": re.id,
+					"from": re.from,
+					"to": re.to,
+					"kind": re.kind as i32,
+					"text": re.text,
+					"score": re.score,
+				}));
+			}
+		}
+	}
+	serde_json::json!({
+		"id": thought.id,
+		"kind": thought.kind as u8,
+		"text": thought.text(),
+		"score": thought.score,
+		"conf": thought.conf_mean(),
+		"conf_uncertainty": thought.conf_variance(),
+		"access_count": thought.access_count.value_i32(),
+		"kern": kern_id,
+		"edges": edges,
+	})
+}
+
 #[cfg(test)]
 mod envelope_shape_tests {
 	//! Slice Z: assert the per-hit JSON shape emitted into the
@@ -302,44 +342,4 @@ mod envelope_shape_tests {
 			assert_eq!(v.get("kind").and_then(|x| x.as_str()), Some(k.as_str()));
 		}
 	}
-}
-
-fn entity_detail(
-	thought: &crate::base::types::Entity,
-	kern_id: &str,
-	g: &crate::base::graph::GraphGnn,
-) -> serde_json::Value {
-	let mut edges = Vec::new();
-	if let Some(kern) = g.kerns.get(kern_id) {
-		let mut rids = Vec::new();
-		if let Some(from_list) = kern.by_from.get(&thought.id) {
-			rids.extend(from_list.iter().cloned());
-		}
-		if let Some(to_list) = kern.by_to.get(&thought.id) {
-			rids.extend(to_list.iter().cloned());
-		}
-		for rid in &rids {
-			if let Some(re) = kern.reasons.get(rid) {
-				edges.push(serde_json::json!({
-					"id": re.id,
-					"from": re.from,
-					"to": re.to,
-					"kind": re.kind as i32,
-					"text": re.text,
-					"score": re.score,
-				}));
-			}
-		}
-	}
-	serde_json::json!({
-		"id": thought.id,
-		"kind": thought.kind as u8,
-		"text": thought.text(),
-		"score": thought.score,
-		"conf": thought.conf_mean(),
-		"conf_uncertainty": thought.conf_variance(),
-		"access_count": thought.access_count.value_i32(),
-		"kern": kern_id,
-		"edges": edges,
-	})
 }

@@ -374,12 +374,10 @@ mod tests {
 		let sink = DirectSink::new(g.clone());
 		let mut mirror = SessionMirror::new(sink);
 
-		let entries = vec![
-			fork_open(100, "fork-a", None),
+		let entries = [fork_open(100, "fork-a", None),
 			fork_open(200, "fork-b", Some("fork-a")),
 			fork_close(300, "fork-a"),
-			fork_close(400, "fork-b"),
-		];
+			fork_close(400, "fork-b")];
 		mirror.process_all(entries.iter());
 		assert_eq!(mirror.seen_count(), 2);
 
@@ -407,10 +405,8 @@ mod tests {
 		let sink = DirectSink::new(g.clone());
 		let mut mirror = SessionMirror::new(sink);
 
-		let entries = vec![
-			fork_open(100, "fork-a", None),
-			fork_open(200, "fork-b", None),
-		];
+		let entries = [fork_open(100, "fork-a", None),
+			fork_open(200, "fork-b", None)];
 		mirror.process_all(entries.iter());
 		mirror.process_all(entries.iter()); // second pass
 

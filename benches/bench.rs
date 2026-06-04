@@ -248,7 +248,7 @@ fn bench_merge_max_vs_softmax(c: &mut Criterion) {
 
 fn bench_hnsw_adaptive_vs_fixed(c: &mut Criterion) {
 	use rand::rngs::StdRng;
-	use rand::{Rng, SeedableRng};
+	use rand::{RngExt, SeedableRng};
 	const DIM: usize = 64;
 	const N: usize = 5_000;
 	const CLUSTERS: usize = 40;

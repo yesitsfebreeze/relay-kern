@@ -184,6 +184,32 @@ pub fn commit_access_with_half_life(results: &mut [ScoredEntity], half_life_secs
 	}
 }
 
+pub fn softmax(values: &[f64], temperature: f64) -> Vec<f64> {
+	let n = values.len();
+	if n == 0 {
+		return Vec::new();
+	}
+	if !temperature.is_finite() || temperature <= 0.0 {
+		return vec![1.0 / n as f64; n];
+	}
+	let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+	if !max.is_finite() {
+		return vec![1.0 / n as f64; n];
+	}
+	let mut out: Vec<f64> = values
+		.iter()
+		.map(|v| ((v - max) / temperature).exp())
+		.collect();
+	let sum: f64 = out.iter().sum();
+	if sum <= 0.0 || !sum.is_finite() {
+		return vec![1.0 / n as f64; n];
+	}
+	for x in out.iter_mut() {
+		*x /= sum;
+	}
+	out
+}
+
 #[cfg(test)]
 mod query_filter_tests {
 	use super::*;
@@ -254,31 +280,5 @@ mod query_filter_tests {
 		assert_eq!(results.len(), 2);
 		assert!(results.iter().all(|r| r.entity.source.scheme() == "file"));
 	}
-}
-
-pub fn softmax(values: &[f64], temperature: f64) -> Vec<f64> {
-	let n = values.len();
-	if n == 0 {
-		return Vec::new();
-	}
-	if !temperature.is_finite() || temperature <= 0.0 {
-		return vec![1.0 / n as f64; n];
-	}
-	let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-	if !max.is_finite() {
-		return vec![1.0 / n as f64; n];
-	}
-	let mut out: Vec<f64> = values
-		.iter()
-		.map(|v| ((v - max) / temperature).exp())
-		.collect();
-	let sum: f64 = out.iter().sum();
-	if sum <= 0.0 || !sum.is_finite() {
-		return vec![1.0 / n as f64; n];
-	}
-	for x in out.iter_mut() {
-		*x /= sum;
-	}
-	out
 }
 
