@@ -387,16 +387,30 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	if let Some(j) = journal::global() {
 		j.set_max_bytes(cfg.journal.max_today_bytes);
 	}
+	// Effective reason endpoint: CLI flag wins when set, else fall back to the
+	// `[reason]` config section (which itself falls back to `[embed]`). Without
+	// this the daemon ignored configured reasoning entirely, so distillation /
+	// edge-proposal were silently disabled unless `--reason-url` was passed.
+	let reason_url = if cli.reason_url.is_empty() {
+		cfg.reason_url().to_string()
+	} else {
+		cli.reason_url.clone()
+	};
+	let reason_model = if cli.reason_model.is_empty() {
+		cfg.reason.model.clone()
+	} else {
+		cli.reason_model.clone()
+	};
 	let llm_client = build_llm(
 		&cli.embed_url,
 		&cli.embed_model,
 		&cfg.embed.key,
-		&cli.reason_url,
-		&cli.reason_model,
+		&reason_url,
+		&reason_model,
 		cfg.reason_key(),
 	);
 
-	let llm_fn: Option<crate::ingest::LlmFunc> = if !cli.reason_url.is_empty() {
+	let llm_fn: Option<crate::ingest::LlmFunc> = if !reason_url.is_empty() {
 		Some(Arc::new(llm_client.complete_func()))
 	} else {
 		None
