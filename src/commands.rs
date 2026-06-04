@@ -559,6 +559,7 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 			graph: g.clone(),
 			node: node.clone(),
 			queue: Some(q.clone()),
+			save: Some(save_fn.clone()),
 		});
 		node.set_handler(crate::gossip::handler::new_handler(deps));
 		match node.listen().await {

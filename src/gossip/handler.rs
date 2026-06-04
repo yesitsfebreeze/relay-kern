@@ -14,6 +14,18 @@ pub struct Deps {
 	pub graph: Arc<RwLock<GraphGnn>>,
 	pub node: Arc<Node>,
 	pub queue: Option<Arc<tick::queue::Queue>>,
+	/// Persist hook. Federation mutations (remote scope inject, counter
+	/// merges, question resolution) call this so federated knowledge survives
+	/// a restart instead of living only in memory.
+	pub save: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl Deps {
+	fn persist(&self) {
+		if let Some(s) = &self.save {
+			s();
+		}
+	}
 }
 
 pub fn new_handler(d: Arc<Deps>) -> Handler {
@@ -95,6 +107,7 @@ fn handle_sphere(d: &Deps, msg: GossipMessage) {
 		}
 		drop(g);
 		d.node.ledger.put_routing(&sphere.network_id, &msg.origin);
+		d.persist();
 	}
 
 	if let Some(q) = &d.queue {
