@@ -1,3 +1,4 @@
+pub mod capture_spool;
 pub mod config;
 pub mod dedup;
 pub mod distill;
