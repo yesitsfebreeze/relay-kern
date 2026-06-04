@@ -1,5 +1,6 @@
 pub mod config;
 pub mod dedup;
+pub mod distill;
 pub mod embed;
 pub mod file_watcher;
 pub mod outcome;
