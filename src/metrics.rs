@@ -133,10 +133,8 @@ mod tests {
 
 	#[test]
 	fn snapshot_heat_computes_fields() {
-		let mut t1 = Entity::default();
-		t1.heat = 1.0;
-		let mut t2 = Entity::default();
-		t2.heat = 3.0;
+		let t1 = Entity { heat: 1.0, ..Default::default() };
+		let t2 = Entity { heat: 3.0, ..Default::default() };
 		let s = snapshot_heat([&t1, &t2]);
 		assert_eq!(s.n, 2);
 		assert_eq!(s.max_heat, 3.0);

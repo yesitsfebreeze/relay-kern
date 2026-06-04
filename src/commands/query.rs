@@ -3,6 +3,7 @@ use crate::base::util::{short_id, truncate};
 
 use super::{build_llm, load_graph, save_graph};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn cmd_query(
 	cfg: &crate::config::Config,
 	text: &str,

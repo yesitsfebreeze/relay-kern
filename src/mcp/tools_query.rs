@@ -50,6 +50,7 @@ struct QueryArgs {
 }
 
 impl Server {
+	#[allow(clippy::field_reassign_with_default)]
 	pub(crate) fn tool_query(&self, args: &serde_json::Value) -> serde_json::Value {
 		let p: QueryArgs = match serde_json::from_value(args.clone()) {
 			Ok(v) => v,

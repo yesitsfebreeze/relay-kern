@@ -196,10 +196,7 @@ impl Client {
 			match tokio::runtime::Handle::try_current() {
 				Ok(handle) => {
 					let result = tokio::task::block_in_place(|| handle.block_on(client.complete(&prompt)));
-					match result {
-						Ok(s) => s,
-						Err(_) => String::new(),
-					}
+					result.unwrap_or_default()
 				}
 				Err(_) => String::new(),
 			}

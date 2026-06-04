@@ -7,6 +7,7 @@ use crate::base::util::truncate;
 
 use super::{build_llm, load_graph, save_graph};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn cmd_ingest(
 	cfg: &crate::config::Config,
 	text_parts: Vec<String>,

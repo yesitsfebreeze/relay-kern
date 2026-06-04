@@ -45,6 +45,9 @@ impl Registry {
 
     pub fn len(&self) -> usize { self.stores.read().unwrap().len() }
 
+    pub fn is_empty(&self) -> bool { self.stores.read().unwrap().is_empty() }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         &self,
         data_dir: &Path,

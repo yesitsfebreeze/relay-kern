@@ -20,6 +20,7 @@ use gnn_propagate::do_gnn_propagate;
 use queue::{task, task_extra, Queue, Task, TaskKind};
 use tasks::{do_enrich, do_name, do_persist, do_resolve, BroadcastQuestionFunc, EmbedFunc, LlmFunc};
 
+#[allow(clippy::too_many_arguments)]
 pub fn start(
 	q: Arc<Queue>,
 	g: Arc<RwLock<GraphGnn>>,
@@ -52,6 +53,7 @@ pub fn start(
 	})
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_task(
 	q: &Queue,
 	g: &Arc<RwLock<GraphGnn>>,

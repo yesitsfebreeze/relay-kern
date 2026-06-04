@@ -15,6 +15,7 @@ pub struct QueryResult {
 	pub path_chains: Vec<PathChain>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn query(
 	g: &GraphGnn,
 	cfg: &RetrievalConfig,
