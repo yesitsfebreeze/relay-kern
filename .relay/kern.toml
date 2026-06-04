@@ -1,11 +1,26 @@
 # Project-scope kern config. Merges over the user-scope kern.toml.
+# (Layered parsing now handles leading comments + [section] headers.)
 
 [reason]
-# Cheap model for distillation + smart-split. Point at your local Ollama
-# (or any OpenAI-compatible endpoint). Falls back to [embed].url if unset.
+# Model for distillation + smart-split + edge proposal. Local Ollama.
+# gemma4 = fast; swap to qwen3.5:27b for higher-quality consolidation.
 url = "http://localhost:11434"
-model = "llama3"
+model = "gemma4:latest"
 
 [capture]
+# Self-learning: capture Claude Code sessions -> distill -> graph -> digest.
 enabled = true
-# dir, poll_secs, digest_path, digest_secs, digest_k use CaptureConfig defaults.
+
+[tick]
+# Self-compaction cadence (heat decay + stigmergy GC + clustering).
+# 0 disables the autonomous driver.
+interval_secs = 60
+
+[gossip]
+# Self-distribution. OFF by default. Set enabled=true on two+ nodes sharing
+# a network id to federate over LAN (discovery auto-peers same-network kerns).
+enabled = false
+addr = "0.0.0.0:7400"
+discovery = true
+discovery_port = 7475
+peers = []
