@@ -1,2 +1,7 @@
 /target
 Cargo.lock
+
+# kern runtime state (keep kern.toml tracked)
+/.relay/kern
+/.relay/capture
+/.relay/journal

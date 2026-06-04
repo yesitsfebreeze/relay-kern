@@ -1,0 +1,11 @@
+# Project-scope kern config. Merges over the user-scope kern.toml.
+
+[reason]
+# Cheap model for distillation + smart-split. Point at your local Ollama
+# (or any OpenAI-compatible endpoint). Falls back to [embed].url if unset.
+url = "http://localhost:11434"
+model = "llama3"
+
+[capture]
+enabled = true
+# dir, poll_secs, digest_path, digest_secs, digest_k use CaptureConfig defaults.
