@@ -4,6 +4,7 @@
 // Section-level merge: project sections replace user sections; missing
 // fields fall through to Default.
 
+mod capture;
 mod embed;
 mod gnn;
 mod gossip;
@@ -16,6 +17,7 @@ mod serve;
 mod tick;
 mod watcher;
 
+pub use capture::CaptureConfig;
 pub use embed::EmbedConfig;
 pub use gnn::GnnConfig;
 pub use gossip::GossipConfig;
@@ -49,6 +51,7 @@ pub struct Config {
 	pub heat: HeatConfig,
 	pub gnn: GnnConfig,
 	pub watcher: WatcherConfig,
+	pub capture: CaptureConfig,
 	pub graph: GraphConfig,
 	pub journal: JournalConfig,
 }
@@ -69,6 +72,7 @@ impl Default for Config {
 			heat: HeatConfig::defaults(),
 			gnn: GnnConfig::default(),
 			watcher: WatcherConfig::default(),
+			capture: CaptureConfig::default(),
 			graph: GraphConfig::default(),
 			journal: JournalConfig::default(),
 		}
