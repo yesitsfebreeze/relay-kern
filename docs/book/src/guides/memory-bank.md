@@ -100,18 +100,23 @@ enableable. Recent work closed the two headline gaps:
   union. Remaining: a transport that actively propagates entity bodies
   between nodes so the merge runs cross-node (today federation shares scope +
   answers + counter deltas; full entity flooding is the next wiring step).
-- **Detached cold-storage tier (implemented).** Stigmergy GC now spills cold,
+- **Detached cold-storage tier (implemented).** Stigmergy GC spills cold,
   abandoned, non-durable thoughts to an append-only cold store
   (`<data_dir>/cold/cold.jsonl`) before dropping them from the hot graph, so
-  compaction never loses data. `kern get <id>` rehydrates from the cold store
-  on a hot-graph miss. Remaining: integrate cold rehydrate into vector
-  *query* (not just id lookup).
-- **Outbound broadcast (implemented).** `gossip::handler::start_announce`
-  periodically broadcasts the kern's scope; federation is now bidirectional.
+  compaction never loses data. The store self-compacts (latest-per-id) each
+  GC sweep. Recall reaches it two ways: `kern get <id>` rehydrates by id, and
+  the `query` tool fills remaining result slots from a cosine search over the
+  cold store (marked `cold:true`) when the hot graph returns fewer than `k`.
+- **Federation (verified).** `start_announce` broadcasts the kern's scope;
+  peers inject it as a phantom kern and persist it. Verified end-to-end: two
+  daemons on one host bidirectionally propagate scope. The `kern_rpc`
+  endpoint is now **per-cwd** (was per-user), so each project gets its own
+  daemon — fixing cross-project memory contamination and letting multiple
+  nodes run per host.
 
-Two operational notes: the `kern_rpc` endpoint is per-user, so the federation
-deployment model is one kern per machine gossiping across machines (local
-single-host multi-node needs a per-cwd endpoint). Near-duplicate handling
-relies on tighter distillation plus stigmergy GC; a non-destructive
-rephrase-linking pass (`find_rephrase_candidates` + `ReasonKind::Rephrase`)
-remains a future primitive.
+Remaining for full write-convergence federation: a transport that floods
+entity *bodies* between peers (today scope, answers, and counter-deltas
+propagate; `base::merge` is ready to converge the bodies when they arrive).
+Near-duplicate handling relies on tighter distillation plus stigmergy GC; a
+non-destructive rephrase-linking pass (`find_rephrase_candidates` +
+`ReasonKind::Rephrase`) remains a future primitive.
