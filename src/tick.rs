@@ -5,6 +5,7 @@ pub mod queue;
 pub mod stigmergy;
 pub mod tasks;
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -27,6 +28,7 @@ pub fn start(
 	broadcast_q: Option<BroadcastQuestionFunc>,
 	gnn_cfg: GnnConfig,
 	tick_cfg: TickConfig,
+	cold_dir: Option<PathBuf>,
 ) -> tokio::task::JoinHandle<()> {
 	let mut rx = q.take_receiver().expect("receiver already taken");
 	tokio::spawn(async move {
@@ -42,6 +44,7 @@ pub fn start(
 				broadcast_q.as_ref(),
 				&gnn_cfg,
 				&tick_cfg,
+				cold_dir.as_deref(),
 			);
 			q.record_task_latency(started.elapsed());
 			q.done();
@@ -58,6 +61,7 @@ fn process_task(
 	bq: Option<&BroadcastQuestionFunc>,
 	gnn_cfg: &GnnConfig,
 	tick_cfg: &TickConfig,
+	cold_dir: Option<&Path>,
 ) {
 	match t.kind {
 		TaskKind::Cluster => do_cluster(q, g, &t.kern_id, tick_cfg, llm, embed),
@@ -67,7 +71,7 @@ fn process_task(
 		TaskKind::ResolveQuestion => do_resolve(q, g, &t.kern_id, &t.extra, bq),
 		TaskKind::Persist => do_persist(g, &t.kern_id),
 		TaskKind::GnnPropagate => do_gnn_propagate(q, g, &t.kern_id, gnn_cfg),
-		TaskKind::StigmergyGc => stigmergy::run_gc(g, &t.kern_id),
+		TaskKind::StigmergyGc => stigmergy::run_gc(g, &t.kern_id, cold_dir),
 	}
 }
 
@@ -249,7 +253,7 @@ pub fn tick_sync(
 	let mut rx = q.take_receiver().unwrap();
 	while let Ok(t) = rx.try_recv() {
 		q.dequeued(&t);
-		process_task(&q, &Arc::clone(g), &t, llm, embed, bq, &gnn_cfg, &tick_cfg);
+		process_task(&q, &Arc::clone(g), &t, llm, embed, bq, &gnn_cfg, &tick_cfg, None);
 		q.done();
 	}
 }

@@ -31,7 +31,11 @@ use crate::base::types::EntityKind;
 ///
 /// Thoughts with no `accessed_at` timestamp are treated as recently created
 /// (preserved); cold-but-untouched bookkeeping should not silently drop them.
-pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
+pub fn run_gc(
+	graph: &Arc<RwLock<GraphGnn>>,
+	kern_id: &str,
+	cold_dir: Option<&std::path::Path>,
+) {
 	let mut g = write_recovered(graph);
 	let kern = match g.kerns.get(kern_id) {
 		Some(k) => k,
@@ -67,6 +71,15 @@ pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 	}
 
 	for id in &victims {
+		if let Some(dir) = cold_dir {
+			// Spill the victim to the detached cold tier before the hot drop,
+			// so self-compaction never permanently loses data. Clone it out
+			// of the kern while we still hold the single write guard.
+			let victim = g.kerns.get(kern_id).and_then(|k| k.entities.get(id)).cloned();
+			if let Some(e) = victim {
+				crate::base::cold::spill(dir, &e);
+			}
+		}
 		remove_entity(&mut g, kern_id, id);
 	}
 }

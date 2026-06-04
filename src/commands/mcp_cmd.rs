@@ -259,6 +259,7 @@ async fn run_standalone(cfg: &crate::config::Config) {
 			}
 		})
 	};
+	let cold_dir = Some(std::path::PathBuf::from(&cfg.data_dir).join("cold"));
 	crate::tick::start(
 		q.clone(),
 		g.clone(),
@@ -267,6 +268,7 @@ async fn run_standalone(cfg: &crate::config::Config) {
 		None,
 		cfg.gnn.into(),
 		cfg.tick,
+		cold_dir,
 	);
 
 	let server = crate::mcp::Server {

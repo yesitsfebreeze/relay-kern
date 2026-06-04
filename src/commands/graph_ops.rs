@@ -13,6 +13,18 @@ pub(super) fn cmd_get(cfg: &crate::config::Config, id: &str) {
 	let (thought, kern_id) = match find_entity_by_prefix(&g, id) {
 		Some(pair) => pair,
 		None => {
+			// Lazy rehydrate: a thought evicted by stigmergy GC was spilled to
+			// the detached cold tier before being dropped from the hot graph.
+			let cold_dir = std::path::PathBuf::from(&cfg.data_dir).join("cold");
+			if let Some(e) = crate::base::cold::get(&cold_dir, id) {
+				println!("ID:     {}", e.id);
+				println!("Kind:   {:?}", e.kind);
+				println!("Score:  {:.4}", e.score);
+				println!("Access: {}", e.access_count.value_i32());
+				println!("Kern:   (cold)");
+				println!("Text:   {}", e.text());
+				return;
+			}
 			eprintln!("thought not found: {id}");
 			return;
 		}

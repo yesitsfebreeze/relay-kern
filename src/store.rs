@@ -81,6 +81,8 @@ impl Registry {
 
         let tick_q = Arc::new(Queue::new(cfg.tick.queue_capacity.max(1)));
 
+        let cold_dir = Some(std::path::PathBuf::from(&store_cfg.data_dir).join("cold"));
+
         let tick_handle = crate::tick::start(
             tick_q.clone(),
             graph.clone(),
@@ -89,6 +91,7 @@ impl Registry {
             broadcast_q,
             cfg.gnn.into(),
             cfg.tick,
+            cold_dir,
         );
 
         crate::tick::enqueue_all(&tick_q, &graph);
