@@ -6,6 +6,7 @@ pub mod hnsw;
 pub mod lexical;
 pub mod locks;
 pub mod math;
+pub mod merge;
 pub mod persist;
 pub mod reason;
 pub mod search;
