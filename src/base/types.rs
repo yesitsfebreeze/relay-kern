@@ -281,6 +281,12 @@ pub struct Entity {
 	pub valid_until: Option<SystemTime>,
 	pub producer_id: String,
 	pub unlinked_count: i32,
+	/// Set when the thought's text is edited in place (wiki-style). A dirty
+	/// entity has a stale `vector`/`gnn_vector` until the reevaluation sweep
+	/// re-embeds it and clears the flag. Persistent so an interrupted
+	/// reevaluation resumes after restart.
+	#[serde(default)]
+	pub dirty: bool,
 }
 
 impl Entity {
@@ -297,6 +303,20 @@ impl Entity {
 			}
 		}
 		buf
+	}
+
+	/// Replace the thought's text in place (wiki-style edit) and mark it dirty
+	/// so the reevaluation sweep re-embeds it. Collapses to a single Context
+	/// chunk and drops the statement refs the original distillation produced.
+	pub fn set_text(&mut self, text: String) {
+		self.statements.clear();
+		self.chunks = vec![ChunkPart {
+			kind: ChunkPartKind::Context,
+			text,
+			index: 0,
+		}];
+		self.updated_at = Some(SystemTime::now());
+		self.dirty = true;
 	}
 
 	pub fn is_fact(&self) -> bool {
@@ -366,9 +386,19 @@ pub struct Reason {
 	#[serde(default)]
 	pub traversal_count: GCounter,
 	pub producer_id: String,
+	/// Set when the edge's text is edited in place. Its `vector` is recomputed
+	/// by the reevaluation sweep (mean of its endpoints) and the flag cleared.
+	#[serde(default)]
+	pub dirty: bool,
 }
 
 impl Reason {
+	/// Replace the edge's text in place and mark it dirty for reevaluation.
+	pub fn set_text(&mut self, text: String) {
+		self.text = text;
+		self.dirty = true;
+	}
+
 	pub fn has_vector(&self) -> bool {
 		!self.vector.is_empty()
 	}
@@ -530,6 +560,7 @@ pub(crate) fn mk_entity(id: &str, text: &str, heat: f64, kind: EntityKind) -> En
 		valid_until: None,
 		producer_id: String::new(),
 		unlinked_count: 0,
+		dirty: false,
 	};
 	e.refresh_score();
 	e
@@ -538,6 +569,33 @@ pub(crate) fn mk_entity(id: &str, text: &str, heat: f64, kind: EntityKind) -> En
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn entity_set_text_replaces_text_and_marks_dirty() {
+		let mut e = Entity {
+			statements: vec!["old statement".into()],
+			chunks: vec![ChunkPart { kind: ChunkPartKind::StatementRef, text: String::new(), index: 0 }],
+			..Default::default()
+		};
+		assert_eq!(e.text(), "old statement");
+		assert!(!e.dirty);
+
+		e.set_text("brand new text".into());
+
+		assert_eq!(e.text(), "brand new text");
+		assert!(e.dirty, "edit must mark the entity dirty for reevaluation");
+		assert!(e.statements.is_empty(), "statement refs are dropped on edit");
+		assert!(e.updated_at.is_some());
+	}
+
+	#[test]
+	fn reason_set_text_replaces_text_and_marks_dirty() {
+		let mut r = Reason { text: "old edge".into(), ..Default::default() };
+		assert!(!r.dirty);
+		r.set_text("new edge".into());
+		assert_eq!(r.text, "new edge");
+		assert!(r.dirty);
+	}
 
 	#[test]
 	fn entity_kind_serde_roundtrip() {

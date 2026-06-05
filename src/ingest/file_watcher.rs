@@ -215,6 +215,7 @@ mod tests {
 				valid_until: None,
 				producer_id: String::new(),
 				unlinked_count: 0,
+				dirty: false,
 			};
 			t.refresh_score();
 			t

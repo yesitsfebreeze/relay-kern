@@ -66,6 +66,7 @@ pub fn update_existing_entity(
 			to_kern_id: String::new(),
 			to_net_id: String::new(),
 			kind: ReasonKind::Rephrase,
+			dirty: false,
 			text: new_text.to_string(),
 			vector: Vec::new(),
 			score: 0.5,

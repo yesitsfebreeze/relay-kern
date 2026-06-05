@@ -75,6 +75,7 @@ let vec = match embed_with_retry(embedder, &job.text, "document", 0).await {
 		valid_until,
 		producer_id: String::new(),
 		unlinked_count: unlinked,
+		dirty: false,
 	};
 	thought.refresh_score();
 
@@ -230,6 +231,7 @@ let conf = confidence.clamp(0.0, 1.0) as f32;
 		valid_until,
 		producer_id: String::new(),
 		unlinked_count: 0,
+		dirty: false,
 	};
 	t.refresh_score();
 	t
@@ -279,6 +281,7 @@ let prompt = format!(
 			to_kern_id: String::new(),
 			to_net_id: String::new(),
 			kind: ReasonKind::Question,
+			dirty: false,
 			text: q.to_string(),
 			vector: Vec::new(),
 			score: 0.5,

@@ -162,6 +162,7 @@ impl MirrorSink for DirectSink {
 			valid_until: None,
 			producer_id: String::new(),
 			unlinked_count: 0,
+			dirty: false,
 		};
 		t.refresh_score();
 		let _ = parent; // recorded in descriptor by WorkerSink path; unused here
