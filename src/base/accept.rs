@@ -17,19 +17,31 @@ pub struct AcceptResult {
 const MAX_ACCEPT_DEPTH: usize = 64;
 
 pub fn accept(g: &mut GraphGnn, kern_id: &str, thought: Entity, doc_id: &str) -> AcceptResult {
-	let target_id = route_entity(g, kern_id, &thought);
-	commit_entity(g, &target_id, thought, doc_id)
+	// The dedup search is invariant in `thought.vector`: it scans entities
+	// graph-wide (independent of the routing cursor) and routing only reads or
+	// spawns empty child kerns, so the result cannot change during descent.
+	// Compute it once here instead of re-running it on every loop iteration and
+	// again in `commit_entity` (previously up to 65 identical HNSW searches).
+	let is_dup = is_duplicate(g, &thought.vector);
+	let target_id = route_entity(g, kern_id, &thought, is_dup);
+	commit_entity(g, &target_id, thought, doc_id, is_dup)
 }
 
-fn route_entity(g: &mut GraphGnn, kern_id: &str, thought: &Entity) -> String {
+/// Whether `vector` is within the dedup threshold of an existing entity.
+fn is_duplicate(g: &GraphGnn, vector: &[f64]) -> bool {
+	let hits = search_all_unlocked(g, vector, 1);
+	!hits.is_empty() && hits[0].score > DEFAULT_DEDUP_THRESHOLD
+}
+
+fn route_entity(g: &mut GraphGnn, kern_id: &str, thought: &Entity, is_dup: bool) -> String {
 	let mut current_id = kern_id.to_string();
 
-	for _depth in 0..MAX_ACCEPT_DEPTH {
-		let hits = search_all_unlocked(g, &thought.vector, 1);
-		if !hits.is_empty() && hits[0].score > DEFAULT_DEDUP_THRESHOLD {
-			return current_id;
-		}
+	// A duplicate is committed in the starting kern; no descent needed.
+	if is_dup {
+		return current_id;
+	}
 
+	for _depth in 0..MAX_ACCEPT_DEPTH {
 		let children = g
 			.loaded(&current_id)
 			.map(|k| k.children.clone())
@@ -69,9 +81,9 @@ fn commit_entity(
 	kern_id: &str,
 	mut thought: Entity,
 	doc_id: &str,
+	is_dup: bool,
 ) -> AcceptResult {
-	let hits = search_all_unlocked(g, &thought.vector, 1);
-	if !hits.is_empty() && hits[0].score > DEFAULT_DEDUP_THRESHOLD {
+	if is_dup {
 		return AcceptResult {
 			placed_in: kern_id.to_string(),
 			entity_id: thought.id.clone(),
@@ -375,5 +387,41 @@ pub fn acceptance_probability(dist: f64, inner: f64, outer: f64) -> f64 {
 	} else {
 		let x = (dist - inner) / (outer - inner);
 		1.0 / (1.0 + (8.0 * (x - 0.5)).exp())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::graph::GraphGnn;
+
+	fn ent(id: &str, vector: Vec<f64>) -> Entity {
+		Entity {
+			id: id.into(),
+			vector,
+			statements: vec!["x".into()],
+			..Default::default()
+		}
+	}
+
+	#[test]
+	fn duplicate_vector_is_deduped() {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		let r1 = accept(&mut g, &root, ent("a", vec![1.0, 0.0, 0.0]), "");
+		assert!(!r1.deduped, "first entity is placed, not deduped");
+		// Identical vector -> cosine 1.0 > dedup threshold -> deduped.
+		let r2 = accept(&mut g, &root, ent("b", vec![1.0, 0.0, 0.0]), "");
+		assert!(r2.deduped, "identical vector must dedup");
+	}
+
+	#[test]
+	fn distinct_vector_is_placed() {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		accept(&mut g, &root, ent("a", vec![1.0, 0.0, 0.0]), "");
+		// Orthogonal vector -> cosine 0.0 < threshold -> placed, not deduped.
+		let r = accept(&mut g, &root, ent("c", vec![0.0, 1.0, 0.0]), "");
+		assert!(!r.deduped, "orthogonal vector must not dedup");
 	}
 }
