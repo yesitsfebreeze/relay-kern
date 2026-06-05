@@ -1,5 +1,6 @@
 /target
-Cargo.lock
+# Cargo.lock IS tracked: kern ships a binary daemon, so the lockfile is
+# committed for reproducible builds across machines.
 
 # kern runtime state (keep kern.toml tracked)
 /.relay/kern
