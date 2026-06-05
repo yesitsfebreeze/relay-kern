@@ -195,7 +195,7 @@ pub fn build_and_save(
 		let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
 		// Random R-regular-ish init so the graph is connected before pruning.
-		for i in 0..count {
+		for (i, slot) in adj.iter_mut().enumerate().take(count) {
 			let mut nbrs = HashSet::new();
 			while nbrs.len() < params.r.min(count - 1) {
 				let j = rng.random_range(0..count) as u32;
@@ -203,7 +203,7 @@ pub fn build_and_save(
 					nbrs.insert(j);
 				}
 			}
-			adj[i] = nbrs.into_iter().collect();
+			*slot = nbrs.into_iter().collect();
 		}
 
 		// Two passes: α = 1.0 then the configured α.
@@ -271,6 +271,7 @@ fn medoid(vectors: &[Vec<f32>]) -> u32 {
 	best
 }
 
+#[allow(clippy::too_many_arguments)] // serializer: grouping the on-disk fields into a struct is churn for no gain
 fn write_files(
 	dir: &Path,
 	dim: usize,

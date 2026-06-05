@@ -74,7 +74,7 @@ pub fn trimmed_mean(values: &[f64], trim_pct: f64) -> Option<f64> {
 	if sorted.is_empty() {
 		return None;
 	}
-	sorted.sort_by(|a, b| cmp_partial(a, b));
+	sorted.sort_by(cmp_partial);
 	let m = sorted.len();
 	let k = ((m as f64) * pct).floor() as usize;
 	if 2 * k >= m {

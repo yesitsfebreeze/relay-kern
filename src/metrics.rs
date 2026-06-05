@@ -41,7 +41,7 @@ pub fn gini_from_iter<I: IntoIterator<Item = f64>>(values: I) -> f64 {
 		return 0.0;
 	}
 
-	v.sort_by(|a, b| cmp_partial(a, b));
+	v.sort_by(cmp_partial);
 
 	let sum: f64 = v.iter().sum();
 	if sum <= 0.0 {

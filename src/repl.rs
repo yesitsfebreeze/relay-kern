@@ -66,7 +66,7 @@ if text.is_empty() {
 
 	let rcfg = crate::config::RetrievalConfig::default();
 	let result = {
-		let g = read_recovered(&graph);
+		let g = read_recovered(graph);
 		crate::retrieval::answer::query(
 			&g,
 			&rcfg,
@@ -136,7 +136,7 @@ if text.is_empty() {
 }
 
 fn do_health(graph: &Arc<RwLock<GraphGnn>>, task_q: &Option<Arc<crate::tick::queue::Queue>>) {
-let g = read_recovered(&graph);
+let g = read_recovered(graph);
 	let kerns = g.all();
 	let mut total_entities = 0usize;
 	let mut total_reasons = 0usize;
@@ -163,7 +163,7 @@ let g = read_recovered(&graph);
 }
 
 fn do_list(graph: &Arc<RwLock<GraphGnn>>) {
-let g = read_recovered(&graph);
+let g = read_recovered(graph);
 	let mut count = 0usize;
 	for k in g.all() {
 		for t in k.entities.values() {
@@ -188,7 +188,7 @@ let q = match task_q {
 			return;
 		}
 	};
-	let mut g = write_recovered(&graph);
+	let mut g = write_recovered(graph);
 	let root_id = g.root.id.clone();
 	crate::tick::pulse::pulse(q, &mut g, &root_id, 1.0);
 	println!("pulsed");
