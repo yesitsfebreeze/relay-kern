@@ -466,6 +466,22 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		None
 	};
 
+	// Keep the embedding model resident. Ollama unloads it after ~5 min idle,
+	// and the OpenAI-compat /v1 endpoint kern uses ignores `keep_alive`, so the
+	// next query pays a multi-second cold reload (~7s for qwen3-embedding here).
+	// A tiny embed every 4 min re-touches the model so retrieval stays warm
+	// (~0.3s). Cheap and self-contained — no dependency on OLLAMA_KEEP_ALIVE.
+	{
+		let warm = llm_client.clone();
+		tokio::spawn(async move {
+			let mut tick = tokio::time::interval(std::time::Duration::from_secs(240));
+			loop {
+				tick.tick().await;
+				let _ = warm.embed("kern-keepalive").await;
+			}
+		});
+	}
+
 	let tick_llm: crate::tick::tasks::LlmFunc = Arc::new(llm_client.complete_func());
 	let tick_embed: crate::tick::tasks::EmbedFunc = {
 		let c = llm_client.clone();
