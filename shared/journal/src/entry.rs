@@ -42,7 +42,7 @@ pub enum Kind {
 	PlanProposal,
 	// Slice I — recents MRU. Emitted whenever a user/agent action touches
 	// an entity (`Open|Drill|Mention|AgentRead|AgentWrite|FsWrite`). The
-	// relay TUI replays these on cold start to seed its in-memory MRU
+	// a client replays these on cold start to seed its in-memory MRU
 	// ring. Payload schema lives in `events::EntityTouchedPayload`.
 	EntityTouched,
 	// Slice K — agnt fork lifecycle. `ForkOpen` marks fork creation (with
@@ -50,7 +50,7 @@ pub enum Kind {
 	// `ForkClose` marks termination. The kern `SessionMirror` tails these
 	// to ingest each fork as a `Document` entity with
 	// `source = Source::Session { session_id = fork_id }` so sessions are
-	// searchable in the relay palette via the `:session` facet. Distinct
+	// searchable via the `:session` facet. Distinct
 	// from the existing `Fork` variant (which records a branch-from-history
 	// point during `Edit`/adjust-mode rewrites and carries a `from_ts_ms`).
 	ForkOpen { fork_id: String, parent: Option<String> },

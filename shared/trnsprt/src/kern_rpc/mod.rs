@@ -1,6 +1,6 @@
 //! `KernRpc` — typed-RPC surface exposing kern's read+write operations
-//! to sub-agents and the relay TUI. Slice J of
-//! `docs/relay-orchestrator-tui.md`.
+//! to sub-agents and a client. 
+//! 
 //!
 //! Layout:
 //! - [`dto`] — wire types ([`QueryReq`], [`IngestReq`], ...). Several

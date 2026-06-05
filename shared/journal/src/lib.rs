@@ -1,7 +1,7 @@
 //! Shared append-only JSONL journal — used by every binary (repl, agnt,
 //! kern, plugins) so events from each process land in the same file.
-//! Originally lived in `agnt/src/journal/`; relay-specific consumers
-//! (`relay_sink`, `recipe::trace`) stay in agnt and depend on this crate.
+//! Append-only cross-process event journal. External consumers
+//! attach their own sinks via the `Sink` trait.
 
 pub mod day_journal;
 pub mod entry;

@@ -5,16 +5,14 @@
 //! - `KernRpcClient<C>` that owns a [`Channel`](crate::typed::Channel),
 //! - `serve_kern_rpc(channel, handler)` server loop.
 //!
-//! Sub-agent recipes and the relay TUI hold a `KernRpcClient`; kern (or
+//! Sub-agents and other clients hold a `KernRpcClient`; kern (or
 //! a mock for tests) implements `KernRpc`. The service is a sibling to
 //! [`SearchSvc`](crate::search::SearchSvc) and intentionally shares
 //! several DTOs with it (`EntityRef`, `EntityKindLite`, `EdgeKind`,
-//! `NeighborsReq`/`Res`) — see `docs/relay-orchestrator-tui.md`
-//! decision #5.
+//! `NeighborsReq`/`Res`).
 //!
-//! `fork_at` is **not** part of `KernRpc`. Forks are agnt's concern;
-//! routing them through kern would force kern to know about agnt
-//! sessions. Slice L will introduce a `fork_at` method on `AgntRpc`.
+//! Session/fork orchestration is intentionally **not** part of
+//! `KernRpc` — kern stays unaware of any client's session model.
 
 use super::dto::{
     CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq, DescriptorRes, ForgetReq,
@@ -25,8 +23,7 @@ use super::dto::{
 
 crate::service! {
     /// Typed-RPC surface exposing kern's read+write operations to
-    /// sub-agents and the relay TUI. See
-    /// `docs/relay-orchestrator-tui.md` (Architecture / KernRpc).
+    /// sub-agents and other clients.
     pub trait KernRpc {
         /// Retrieval pipeline: ranked hits + optional LLM answer.
         async fn query(req: QueryReq) -> QueryRes;

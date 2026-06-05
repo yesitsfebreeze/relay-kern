@@ -222,7 +222,7 @@ impl ToolCallEvent {
 	}
 }
 
-/// Discrete touch op recorded against an entity (slice I). The relay TUI
+/// Discrete touch op recorded against an entity (slice I). A client
 /// uses these to seed its MRU recents ring; the same enum is logged into
 /// the shared journal so cross-process activity surfaces in the ring after
 /// replay.

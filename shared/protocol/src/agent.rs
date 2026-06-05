@@ -68,8 +68,8 @@ pub enum ForkKind {
 }
 
 
-/// Wire-level fork lifecycle. Mirrors the relay-internal `ForkState`
-/// enum used by the agent strip; relay converts at the boundary.
+/// Wire-level fork lifecycle. Mirrors the client-internal `ForkState`
+/// enum used by the agent strip; the client converts at the boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ForkStateLite {
     Idle,
@@ -80,7 +80,7 @@ pub enum ForkStateLite {
 }
 
 /// Snapshot of one fork as exposed by `AgntRpc::list_forks`. Carries
-/// just enough for the relay TUI to paint a tile + drill summary.
+/// just enough for a client to paint a tile + drill summary.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ForkSnapshot {
     pub fork_id: String,
@@ -108,7 +108,7 @@ trnsprt::service! {
     async fn run_slash(fork_id: String, body: String) -> SlashOutcome;
     async fn poll_output(fork_id: String) -> Vec<OutputEvent>;
     async fn list_plugins() -> Vec<PluginSummary>;
-    /// Snapshot every live fork on the server. Used by the relay TUI to
+    /// Snapshot every live fork on the server. Used by a client to
     /// paint the bottom-row agent strip. Best-effort projection of each
     /// `Session`'s log into a `ForkSnapshot`.
     async fn list_forks() -> Vec<ForkSnapshot>;
@@ -139,7 +139,7 @@ trnsprt::service! {
     /// this fork uses that model instead of the default. Returns the new fork id.
     async fn fork_open_child(parent_fork_id: String, kind: ForkKind, model_override: Option<String>) -> String;
     /// Update the `ForkKind` of an existing fork without changing its history.
-    /// Used by relay to tag the startup fork as `Orchestrator`.
+    /// Used to tag the startup fork as `Orchestrator`.
     async fn set_fork_kind(fork_id: String, kind: ForkKind) -> ();
 }
 }

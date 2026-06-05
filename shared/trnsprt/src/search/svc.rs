@@ -13,7 +13,7 @@ use super::dto::{
 };
 
 crate::service! {
-    /// Search palette RPC surface. See `docs/relay-search-tui.md`
+    /// Search palette RPC surface
     /// (Transport section).
     pub trait SearchSvc {
         /// Incremental ranked search across the connected index.

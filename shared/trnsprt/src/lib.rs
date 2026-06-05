@@ -33,14 +33,12 @@ extern crate self as trnsprt;
 pub mod typed;
 pub use trnsprt_macros::service;
 
-// -- SearchSvc — typed-RPC surface for the relay search palette
-//    (slice B of docs/relay-search-tui.md). Re-exports the generated
+// -- SearchSvc — typed-RPC search surface. Re-exports the generated
 //    trait/client/serve fn through `search::*`.
 pub mod search;
 
 // -- KernRpc — typed-RPC surface exposing kern's read+write ops to
-//    sub-agents and the relay TUI (slice J of
-//    docs/relay-orchestrator-tui.md). Sibling to `search::SearchSvc`;
+//    sub-agents and other clients. Sibling to `search::SearchSvc`;
 //    DTOs are intentionally shared where the wire shape overlaps.
 pub mod kern_rpc;
 

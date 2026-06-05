@@ -1,4 +1,4 @@
-//! `SearchSvc` — typed-RPC surface for the relay search palette.
+//! `SearchSvc` — typed-RPC surface for search.
 //!
 //! Layout:
 //! - [`dto`] — wire types ([`SearchReq`], [`PreviewRes`], ...).
