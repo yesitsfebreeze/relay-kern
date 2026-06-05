@@ -23,7 +23,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
@@ -61,7 +61,10 @@ pub async fn run(graph: Graph, agg_addr: &str) -> std::io::Result<()> {
 	// 1. Local graph server on an ephemeral loopback port (this daemon's own data).
 	let local = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
 	let local_addr = local.local_addr()?.to_string();
-	let local_app = Router::new().route("/graph", get(graph_json)).with_state(graph);
+	let local_app = Router::new()
+		.route("/graph", get(graph_json))
+		.route("/search", post(peer_search))
+		.with_state(graph);
 	tokio::spawn(async move {
 		if let Err(e) = axum::serve(local, local_app).await {
 			tracing::warn!(target: "kern.viewer", error = %e, "local graph server exited");
@@ -306,6 +309,57 @@ mod tests {
 		assert_eq!(out[0]["kern"], "A|k1");
 		assert_eq!(out[1]["id"], "B|e2");
 	}
+}
+
+fn default_k() -> usize { 10 }
+
+#[derive(serde::Deserialize)]
+struct SearchBody {
+    vec: Vec<f64>,
+    #[serde(default = "default_k")]
+    k: usize,
+}
+
+/// Peer endpoint: rank this daemon's graph against a *supplied* query vector.
+/// No embedding happens here — the hub already embedded once and passes the
+/// vector down, so N daemons cost one embed call total.
+async fn peer_search(State(g): State<Graph>, Json(body): Json<SearchBody>) -> Json<Value> {
+    use crate::base::search::{
+        find_entity, find_reason, search_all_unlocked, search_reasons_all_unlocked,
+    };
+    let g = read_recovered(&g);
+
+    let mut hits = Vec::new();
+    for h in search_all_unlocked(&g, &body.vec, body.k) {
+        if let Some((e, kern)) = find_entity(&g, &h.entity_id) {
+            hits.push(json!({
+                "id": e.id,
+                "label": truncate(&e.text(), 60),
+                "kind": format!("{:?}", e.kind),
+                "kern": kern,
+                "heat": e.heat,
+                "conf": e.conf_mean(),
+                "score": h.score,
+            }));
+        }
+    }
+
+    let mut reasons = Vec::new();
+    for h in search_reasons_all_unlocked(&g, &body.vec, body.k) {
+        if let Some((r, kern)) = find_reason(&g, &h.reason_id) {
+            // id is the edge's target entity so a click anchors a real node,
+            // matching today's substring behavior (results used l.target).
+            reasons.push(json!({
+                "id": r.to,
+                "label": truncate(&r.text, 80),
+                "kind": format!("{:?}", r.kind),
+                "kern": kern,
+                "score": h.score,
+            }));
+        }
+    }
+
+    Json(json!({ "hits": hits, "reasons": reasons }))
 }
 
 /// Snapshot the live graph as `{nodes, links, kerns}`. Nodes are entities
