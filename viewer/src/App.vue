@@ -150,11 +150,8 @@ function drill(dataNode) {
 function out() { if (stack.length > 1) { stack.pop(); hoverId = null; render('out') } }
 function goTo(id) { const i = stack.findIndex(n => n.id === id); if (i >= 0) { stack.length = i + 1; render('out') } }
 
-function onWheel(ev) {
-  ev.preventDefault()
-  const now = Date.now(); if (now - wheelLock < 360) return; wheelLock = now
-  if (ev.deltaY > 0) { const d = (layoutRoot.children || []).find(c => c.data.ref.id === hoverId)?.data.ref; if (d?.type === 'kern') drill(d) }
-  else out()
+function onKey(ev) {
+  if (ev.key === 'Escape') { ev.preventDefault(); out() }
 }
 
 async function load() {
@@ -177,11 +174,11 @@ async function load() {
 
 onMounted(() => {
   svg = d3.select(svgEl.value); g = svg.append('g')
-  svgEl.value.addEventListener('wheel', onWheel, { passive: false })
+  window.addEventListener('keydown', onKey)
   window.addEventListener('resize', () => render(null))
   load(); timer = setInterval(load, 5000)
 })
-onBeforeUnmount(() => { if (timer) clearInterval(timer); svgEl.value?.removeEventListener('wheel', onWheel) })
+onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListener('keydown', onKey) })
 </script>
 
 <template>
@@ -196,7 +193,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); svgEl.value?.removeEven
     <span class="stat">· {{ stats }}</span>
     <span v-if="err" class="err"> — {{ err }}</span>
   </div>
-  <div class="path">{{ detail || 'hover a cube · scroll ↓ to dive into it · scroll ↑ to go back' }}</div>
+  <div class="path">{{ detail || 'click a cube to enter · Esc to go back' }}</div>
   <svg ref="svgEl" class="tm"></svg>
 </template>
 
