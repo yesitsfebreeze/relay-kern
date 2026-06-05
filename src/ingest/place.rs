@@ -32,7 +32,7 @@ let vec = match embed_with_retry(embedder, &job.text, "document", 0).await {
 	};
 
 	if let Some(existing_id) = find_duplicate(graph, &vec, dedup_threshold) {
-		update_existing_entity(graph, &existing_id, &job.text, vec, job.confidence);
+		update_existing_entity(graph, &existing_id, &job.text, job.confidence);
 		return (Some(existing_id), None);
 	}
 
@@ -145,7 +145,7 @@ let root_id = match graph.read() {
 		}
 
 		if let Some(existing_id) = find_duplicate(graph, vec, dedup_threshold) {
-			update_existing_entity(graph, &existing_id, chunk, vec.clone(), job.confidence);
+			update_existing_entity(graph, &existing_id, chunk, job.confidence);
 			placed += 1;
 			continue;
 		}
