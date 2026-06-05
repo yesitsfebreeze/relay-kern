@@ -19,6 +19,7 @@ pub fn pulse(q: &Queue, g: &mut GraphGnn, kern_id: &str, strength: f64) {
 	// either. The next above-threshold pulse will trigger the sweep.
 	if strength >= PULSE_THRESHOLD {
 		maybe_enqueue_stigmergy_gc(q, g);
+		maybe_enqueue_reembed(q, g);
 	}
 }
 
@@ -55,6 +56,18 @@ fn maybe_enqueue_stigmergy_gc(q: &Queue, g: &GraphGnn) {
 	}
 	for kern_id in g.kerns.keys() {
 		q.enqueue(task(TaskKind::StigmergyGc, kern_id));
+	}
+}
+
+/// Enqueue a `Reembed` sweep for every kern that has a dirty (edited) thought or
+/// reason, so edits made directly in the graph get re-embedded even without an
+/// explicit trigger (e.g. after a restart). Dedup is owned by `Queue::enqueue`.
+fn maybe_enqueue_reembed(q: &Queue, g: &GraphGnn) {
+	for (kern_id, k) in g.kerns.iter() {
+		let dirty = k.entities.values().any(|e| e.dirty) || k.reasons.values().any(|r| r.dirty);
+		if dirty {
+			q.enqueue(task(TaskKind::Reembed, kern_id));
+		}
 	}
 }
 

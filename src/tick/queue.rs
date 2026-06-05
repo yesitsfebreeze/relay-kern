@@ -19,6 +19,8 @@ pub enum TaskKind {
 	/// has fully evaporated (cold + stale + non-durable). Dispatched in
 	/// `tick::process_task` to `tick::stigmergy::run_gc`.
 	StigmergyGc,
+	/// Re-embed dirty (edited) thoughts/reasons in a kern and clear the flag.
+	Reembed,
 }
 
 #[derive(Debug, Clone)]

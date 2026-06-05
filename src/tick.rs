@@ -18,7 +18,7 @@ use crate::gnn::propagate::GnnConfig;
 use cluster::{cohesion, is_core_cluster, vector_cluster};
 use gnn_propagate::do_gnn_propagate;
 use queue::{task, task_extra, Queue, Task, TaskKind};
-use tasks::{do_enrich, do_name, do_persist, do_resolve, BroadcastQuestionFunc, EmbedFunc, LlmFunc};
+use tasks::{do_enrich, do_name, do_persist, do_reembed, do_resolve, BroadcastQuestionFunc, EmbedFunc, LlmFunc};
 
 #[allow(clippy::too_many_arguments)]
 pub fn start(
@@ -74,6 +74,7 @@ fn process_task(
 		TaskKind::Persist => do_persist(g, &t.kern_id),
 		TaskKind::GnnPropagate => do_gnn_propagate(q, g, &t.kern_id, gnn_cfg),
 		TaskKind::StigmergyGc => stigmergy::run_gc(g, &t.kern_id, cold_dir),
+		TaskKind::Reembed => do_reembed(g, &t.kern_id, embed),
 	}
 }
 

@@ -264,3 +264,115 @@ pub fn do_persist(g: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 	};
 	let _ = save_kern(&graph.data_dir, kern);
 }
+
+/// Re-embed every dirty entity (and recompute dirty reason vectors) in `kern_id`,
+/// then clear the flag and rebuild the index. The dirty flag is the durable
+/// source of truth — set on edit, cleared here once the stale vector is replaced.
+pub fn do_reembed(
+	g: &Arc<RwLock<GraphGnn>>,
+	kern_id: &str,
+	embed: Option<&EmbedFunc>,
+) {
+	let Some(embed) = embed else { return };
+
+	// Snapshot dirty entity (id, text) under a read guard.
+	let dirty_ents: Vec<(String, String)> = {
+		let g = read_recovered(g);
+		let Some(k) = g.kerns.get(kern_id) else { return };
+		k.entities
+			.values()
+			.filter(|e| e.dirty)
+			.map(|e| (e.id.clone(), e.text()))
+			.collect()
+	};
+
+	// Embed outside the lock (network I/O).
+	let mut new_vecs: Vec<(String, Vec<f64>)> = Vec::new();
+	for (id, text) in &dirty_ents {
+		if let Ok(v) = embed(text) {
+			if !v.is_empty() {
+				new_vecs.push((id.clone(), v));
+			}
+		}
+	}
+
+	// Are there dirty reasons to recompute too?
+	let has_dirty_reasons = {
+		let g = read_recovered(g);
+		g.kerns
+			.get(kern_id)
+			.map(|k| k.reasons.values().any(|r| r.dirty))
+			.unwrap_or(false)
+	};
+
+	if new_vecs.is_empty() && !has_dirty_reasons {
+		return;
+	}
+
+	// Write back under a write guard.
+	{
+		let mut g = write_recovered(g);
+		let Some(k) = g.kerns.get_mut(kern_id) else { return };
+		for (id, v) in &new_vecs {
+			if let Some(e) = k.entities.get_mut(id) {
+				e.vector = v.clone();
+				e.gnn_vector = v.clone();
+				e.dirty = false;
+			}
+		}
+		// Recompute dirty reason vectors as the mean of their (now-updated)
+		// endpoint vectors; clear the flag.
+		let endpoint = |k: &crate::base::types::Kern, id: &str| -> Option<Vec<f64>> {
+			k.entities.get(id).map(|e| e.vector.clone()).filter(|v| !v.is_empty())
+		};
+		let reason_ids: Vec<String> = k
+			.reasons
+			.values()
+			.filter(|r| r.dirty)
+			.map(|r| r.id.clone())
+			.collect();
+		for rid in reason_ids {
+			let (from, to) = match k.reasons.get(&rid) {
+				Some(r) => (r.from.clone(), r.to.clone()),
+				None => continue,
+			};
+			let nv = match (endpoint(k, &from), endpoint(k, &to)) {
+				(Some(fv), Some(tv)) => Some(crate::base::math::average_vec(&fv, &tv)),
+				_ => None,
+			};
+			if let Some(r) = k.reasons.get_mut(&rid) {
+				if let Some(v) = nv {
+					r.vector = v;
+				}
+				r.dirty = false;
+			}
+		}
+		g.rebuild_index();
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::graph::GraphGnn;
+	use crate::base::types::{Entity, Kern};
+	use std::sync::{Arc, RwLock};
+
+	#[test]
+	fn do_reembed_clears_dirty_and_sets_vector() {
+		let mut g = GraphGnn::new();
+		let kid = "k1".to_string();
+		let mut kern = Kern::new(kid.clone(), "");
+		let mut e = Entity { id: "e1".into(), dirty: true, ..Default::default() };
+		e.set_text("hello world".into());
+		kern.entities.insert(e.id.clone(), e);
+		g.kerns.insert(kid.clone(), kern);
+		let g = Arc::new(RwLock::new(g));
+		let embed: EmbedFunc = Arc::new(|_t: &str| Ok(vec![0.1, 0.2, 0.3]));
+		do_reembed(&g, &kid, Some(&embed));
+		let g = g.read().unwrap();
+		let e = g.kerns.get(&kid).unwrap().entities.get("e1").unwrap();
+		assert!(!e.dirty, "dirty must be cleared after reembed");
+		assert_eq!(e.vector, vec![0.1, 0.2, 0.3]);
+	}
+}
