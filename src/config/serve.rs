@@ -7,6 +7,8 @@ pub struct ServeConfig {
 	pub core_addr: String,
 	pub gossip: String,
 	pub mcp_sse: String,
+	/// Live graph viewer bind address. Localhost-only by default; empty = off.
+	pub viewer: String,
 }
 
 impl Default for ServeConfig {
@@ -16,6 +18,7 @@ impl Default for ServeConfig {
 			core_addr: ":2666".into(),
 			gossip: ":7946".into(),
 			mcp_sse: ":3000".into(),
+			viewer: "127.0.0.1:7700".into(),
 		}
 	}
 }

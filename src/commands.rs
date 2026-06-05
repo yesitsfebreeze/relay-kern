@@ -518,6 +518,18 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	let q = entry.tick_q.clone();
 	let save_fn = entry.save_fn.clone();
 
+	// Live graph viewer — a read-only web UI over the current graph. Localhost
+	// by default (cfg.serve.viewer); empty disables it.
+	if !cfg.serve.viewer.is_empty() {
+		let vg = g.clone();
+		let vaddr = cfg.serve.viewer.clone();
+		tokio::spawn(async move {
+			if let Err(e) = crate::viewer::run(vg, &vaddr).await {
+				tracing::warn!(target: "kern.viewer", error = %e, "graph viewer failed to start");
+			}
+		});
+	}
+
 	// Slice K — session mirror. Tails the shared journal `fork_*`
 	// lifecycle events and ingests each new fork as a `Document` entity
 	// with `Source::Session`. Skipped silently if the project's history
