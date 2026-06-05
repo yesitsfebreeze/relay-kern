@@ -400,36 +400,23 @@ impl KernRpc for KernRpcHandler {
         let kern = self.kern.clone();
         async move {
             // Re-use `tool_query`'s `id`-mode (returns `entity_detail`
-            // with edges) to source the depth-1 neighbour set.
-            // edge_kinds is treated as a client-side filter on the
-            // returned set; depth >1 is not exercised in slice J.
-            let _depth = req.depth.min(3);
+            // with edges) to source the depth-1 neighbour set. Only
+            // depth-1 is implemented; `req.depth` is intentionally not
+            // honored here (no multi-hop expansion), so we do not compute
+            // a misleading depth bound.
             let args = serde_json::json!({ "id": req.entity_id });
             let env = kern.tool_query(&args);
             let payload = match unwrap_tool_json(&env) {
                 Ok(v) => v,
                 Err(_) => return NeighborsRes::default(),
             };
-            let mut neighbour_ids: Vec<String> = Vec::new();
-            if let Some(edges) = payload.get("edges").and_then(|v| v.as_array()) {
-                for e in edges {
-                    let from = e.get("from").and_then(|v| v.as_str()).unwrap_or("");
-                    let to = e.get("to").and_then(|v| v.as_str()).unwrap_or("");
-                    let other = if from == req.entity_id { to } else { from };
-                    if other.is_empty() || other == req.entity_id {
-                        continue;
-                    }
-                    if !neighbour_ids.iter().any(|x| x == other) {
-                        neighbour_ids.push(other.to_string());
-                    }
-                    // edge_kinds filter: kern's internal `ReasonKind`
-                    // does not yet map 1:1 to the slice-B `EdgeKind`
-                    // enum, so we accept all kinds when the caller's
-                    // filter is empty and otherwise apply no further
-                    // narrowing in slice J. Slice K introduces the
-                    // proper mapping.
-                }
-            }
+            // Cap the neighbour set BEFORE the per-id detail fetch. The raw
+            // edge count is data-controlled (an entity can be linked to
+            // thousands), so without a cap the detail loop is an N+1
+            // latency/CPU amplification vector that repeatedly takes the
+            // read lock. MAX_NEIGHBORS bounds it to a constant.
+            let neighbour_ids =
+                collect_neighbour_ids(&payload, &req.entity_id, MAX_NEIGHBORS);
             let mut neighbors = Vec::with_capacity(neighbour_ids.len());
             for id in neighbour_ids {
                 let detail_args = serde_json::json!({ "id": id });
@@ -585,6 +572,42 @@ impl KernRpc for KernRpcHandler {
             CallToolRes { envelope }
         }
     }
+}
+
+/// Upper bound on neighbours returned (and detail-fetched) by the
+/// `neighbors` RPC. The raw edge count is data-controlled, so this cap
+/// keeps the per-id detail loop O(1) in the entity's degree.
+const MAX_NEIGHBORS: usize = 64;
+
+/// Collect the distinct depth-1 neighbour ids from a `tool_query`
+/// `entity_detail` payload's `edges` array: take the *other* endpoint of
+/// each edge, skip empties and self-loops, dedup preserving first-seen
+/// order, and cap at `max`. Pure so it is unit-testable without standing
+/// up an `mcp::Server` graph.
+fn collect_neighbour_ids(
+    payload: &serde_json::Value,
+    entity_id: &str,
+    max: usize,
+) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    let Some(edges) = payload.get("edges").and_then(|v| v.as_array()) else {
+        return ids;
+    };
+    for e in edges {
+        if ids.len() >= max {
+            break;
+        }
+        let from = e.get("from").and_then(|v| v.as_str()).unwrap_or("");
+        let to = e.get("to").and_then(|v| v.as_str()).unwrap_or("");
+        let other = if from == entity_id { to } else { from };
+        if other.is_empty() || other == entity_id {
+            continue;
+        }
+        if !ids.iter().any(|x| x == other) {
+            ids.push(other.to_string());
+        }
+    }
+    ids
 }
 
 /// Look up an entity's kind / source-scheme / status via the kern
@@ -778,5 +801,52 @@ mod envelope_parse_tests {
         assert_eq!(parse_status_label("active"), EntityStatusLite::Active);
         assert_eq!(parse_status_label(""), EntityStatusLite::Active);
         assert_eq!(parse_status_label("garbage"), EntityStatusLite::Active);
+    }
+}
+
+#[cfg(test)]
+mod neighbors_cap_tests {
+    //! Card #44: the `neighbors` RPC must cap its fan-out at MAX_NEIGHBORS so
+    //! a high-degree entity can't drive an O(degree) N+1 detail loop. Covers
+    //! the pure id-collection helper (self/empty exclusion, dedup, cap).
+    use super::*;
+    use serde_json::json;
+
+    fn payload_with_edges(center: &str, others: &[&str]) -> serde_json::Value {
+        let edges: Vec<_> = others
+            .iter()
+            .map(|o| json!({ "from": center, "to": o }))
+            .collect();
+        json!({ "edges": edges })
+    }
+
+    #[test]
+    fn caps_high_degree_fan_out() {
+        // 500 distinct neighbours -> at most MAX_NEIGHBORS returned.
+        let names: Vec<String> = (0..500).map(|i| format!("n{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let payload = payload_with_edges("center", &refs);
+        let ids = collect_neighbour_ids(&payload, "center", MAX_NEIGHBORS);
+        assert_eq!(ids.len(), MAX_NEIGHBORS, "fan-out capped at MAX_NEIGHBORS");
+    }
+
+    #[test]
+    fn excludes_self_and_empty_and_dedups() {
+        // edges include a self-loop, an empty endpoint, and a duplicate.
+        let payload = json!({ "edges": [
+            { "from": "c", "to": "a" },
+            { "from": "b", "to": "c" }, // other endpoint = b
+            { "from": "c", "to": "c" }, // self-loop -> skipped
+            { "from": "c", "to": "" },  // empty -> skipped
+            { "from": "c", "to": "a" }, // duplicate -> deduped
+        ]});
+        let ids = collect_neighbour_ids(&payload, "c", MAX_NEIGHBORS);
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn missing_edges_yields_empty() {
+        let ids = collect_neighbour_ids(&json!({}), "c", MAX_NEIGHBORS);
+        assert!(ids.is_empty());
     }
 }
