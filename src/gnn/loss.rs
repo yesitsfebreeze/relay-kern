@@ -15,12 +15,29 @@ pub fn mse_grad(predicted: &Tensor, target: &Tensor) -> Tensor {
 	diff
 }
 
+/// Resolve a float label to a valid class index in `[0, num_classes)`.
+///
+/// Returns `None` for non-finite, negative, or out-of-range labels so callers
+/// can skip the row, instead of (a) panicking on a slice out-of-bounds when the
+/// label is too large or (b) silently mapping a `NaN`/negative label to class 0
+/// via a raw `as usize` cast (`NaN as usize == 0`, negatives saturate to 0).
+fn class_index(label: f64, num_classes: usize) -> Option<usize> {
+	if !label.is_finite() || label < 0.0 {
+		return None;
+	}
+	let idx = label as usize;
+	(idx < num_classes).then_some(idx)
+}
+
 pub fn cross_entropy_loss(predicted: &Tensor, target: &Tensor) -> f64 {
 	let log_probs = log_softmax(predicted);
 	let n = predicted.rows;
 	let mut loss = 0.0;
 	for i in 0..n {
-		let class_idx = target.at(i, 0) as usize;
+		let Some(class_idx) = class_index(target.at(i, 0), predicted.cols) else {
+			tracing::warn!(target: "kern.gnn", row = i, label = target.at(i, 0), "invalid class label; skipping row in cross_entropy_loss");
+			continue;
+		};
 		loss -= log_probs.at(i, class_idx);
 	}
 	loss / n as f64
@@ -30,8 +47,17 @@ pub fn cross_entropy_grad(predicted: &Tensor, target: &Tensor) -> Tensor {
 	let mut probs = softmax(predicted);
 	let n = predicted.rows;
 	for i in 0..n {
-		let class_idx = target.at(i, 0) as usize;
-		probs.set(i, class_idx, probs.at(i, class_idx) - 1.0);
+		match class_index(target.at(i, 0), predicted.cols) {
+			Some(class_idx) => probs.set(i, class_idx, probs.at(i, class_idx) - 1.0),
+			None => {
+				// Invalid label: emit no gradient signal for this row rather
+				// than corrupting it with an un-subtracted softmax.
+				tracing::warn!(target: "kern.gnn", row = i, label = target.at(i, 0), "invalid class label; zeroing grad row in cross_entropy_grad");
+				for j in 0..probs.cols {
+					probs.set(i, j, 0.0);
+				}
+			}
+		}
 	}
 	let scale = 1.0 / n as f64;
 	probs.scale_inplace(scale);
@@ -42,7 +68,10 @@ pub fn nll_loss(predicted: &Tensor, target: &Tensor) -> f64 {
 	let n = predicted.rows;
 	let mut loss = 0.0;
 	for i in 0..n {
-		let class_idx = target.at(i, 0) as usize;
+		let Some(class_idx) = class_index(target.at(i, 0), predicted.cols) else {
+			tracing::warn!(target: "kern.gnn", row = i, label = target.at(i, 0), "invalid class label; skipping row in nll_loss");
+			continue;
+		};
 		loss -= predicted.at(i, class_idx);
 	}
 	loss / n as f64
@@ -52,8 +81,8 @@ pub fn accuracy(predicted: &Tensor, target: &Tensor) -> f64 {
 	let mut correct = 0;
 	for i in 0..predicted.rows {
 		let pred = predicted.max_in_row(i);
-		let true_class = target.at(i, 0).round() as usize;
-		if pred == true_class {
+		// An invalid label can never match the argmax -> counts as incorrect.
+		if class_index(target.at(i, 0).round(), predicted.cols) == Some(pred) {
 			correct += 1;
 		}
 	}
@@ -123,4 +152,58 @@ pub fn link_prediction_grad(
 		}
 	}
 	grad
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn class_index_validates_range_and_finiteness() {
+		assert_eq!(class_index(0.0, 3), Some(0));
+		assert_eq!(class_index(2.0, 3), Some(2));
+		assert_eq!(class_index(3.0, 3), None); // out of range
+		assert_eq!(class_index(-1.0, 3), None); // negative
+		assert_eq!(class_index(f64::NAN, 3), None);
+		assert_eq!(class_index(f64::INFINITY, 3), None);
+	}
+
+	#[test]
+	fn cross_entropy_loss_skips_out_of_range_label_no_panic() {
+		let predicted = Tensor::new(1, 3, vec![0.1, 0.2, 0.7]).unwrap();
+		let target = Tensor::new(1, 1, vec![5.0]).unwrap(); // class 5 of 3
+		let loss = cross_entropy_loss(&predicted, &target);
+		// Row skipped -> 0, NOT attributed to class 0 (which would be > 0).
+		assert_eq!(loss, 0.0);
+	}
+
+	#[test]
+	fn cross_entropy_loss_nan_label_not_treated_as_class_zero() {
+		let predicted = Tensor::new(1, 3, vec![5.0, 0.0, 0.0]).unwrap();
+		let nan_target = Tensor::new(1, 1, vec![f64::NAN]).unwrap();
+		assert_eq!(cross_entropy_loss(&predicted, &nan_target), 0.0);
+		// A valid class-0 label DOES produce a positive loss — proving the NaN
+		// case above was genuinely skipped, not silently mapped to class 0.
+		let valid = Tensor::new(1, 1, vec![0.0]).unwrap();
+		assert!(cross_entropy_loss(&predicted, &valid) > 0.0);
+	}
+
+	#[test]
+	fn cross_entropy_grad_zeroes_invalid_row_no_panic() {
+		let predicted = Tensor::new(1, 3, vec![0.1, 0.2, 0.7]).unwrap();
+		let target = Tensor::new(1, 1, vec![9.0]).unwrap();
+		let grad = cross_entropy_grad(&predicted, &target);
+		assert!(grad.data.iter().all(|&v| v == 0.0), "invalid row grad must be zero");
+	}
+
+	#[test]
+	fn accuracy_counts_invalid_label_as_incorrect() {
+		// argmax of row is class 2; label 9 is out of range -> incorrect.
+		let predicted = Tensor::new(1, 3, vec![0.1, 0.2, 0.7]).unwrap();
+		let target = Tensor::new(1, 1, vec![9.0]).unwrap();
+		assert_eq!(accuracy(&predicted, &target), 0.0);
+		// Correct label scores 1.0.
+		let good = Tensor::new(1, 1, vec![2.0]).unwrap();
+		assert_eq!(accuracy(&predicted, &good), 1.0);
+	}
 }
