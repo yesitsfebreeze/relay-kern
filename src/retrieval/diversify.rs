@@ -95,7 +95,56 @@ pub fn mmr(cfg: &RetrievalConfig, query_vec: &[f64], results: &mut Vec<ScoredEnt
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::base::types::Entity;
+	use crate::base::types::{Entity, Source};
+
+	fn sect(id: &str, section: &str, score: f64) -> ScoredEntity {
+		ScoredEntity {
+			entity: Entity {
+				id: id.into(),
+				source: Source::Inline {
+					hash: id.into(),
+					section: section.into(),
+				},
+				..Default::default()
+			},
+			score,
+		}
+	}
+
+	#[test]
+	fn dedup_keeps_highest_per_section() {
+		let cfg = RetrievalConfig::default(); // dedup_by_section = true
+		let mut results = vec![
+			sect("a", "doc#chunk0", 0.4),
+			sect("b", "doc#chunk1", 0.9), // same stem "doc" -> higher kept
+			sect("c", "other#chunk0", 0.5),
+		];
+		dedup_by_section(&cfg, &mut results);
+		let ids: Vec<&str> = results.iter().map(|r| r.entity.id.as_str()).collect();
+		assert!(ids.contains(&"b"), "highest in section kept: {ids:?}");
+		assert!(!ids.contains(&"a"), "lower in same section dropped: {ids:?}");
+		assert!(ids.contains(&"c"), "distinct section kept: {ids:?}");
+		assert_eq!(results.len(), 2);
+	}
+
+	#[test]
+	fn dedup_keeps_empty_section_entries() {
+		let cfg = RetrievalConfig::default();
+		let mut results = vec![sect("a", "", 0.1), sect("b", "", 0.2)];
+		dedup_by_section(&cfg, &mut results);
+		assert_eq!(results.len(), 2, "empty-section entries are never collapsed");
+	}
+
+	#[test]
+	fn dedup_noop_when_disabled() {
+		let cfg = RetrievalConfig {
+			dedup_by_section: false,
+			..Default::default()
+		};
+		let mut results = vec![sect("a", "doc#chunk0", 0.4), sect("b", "doc#chunk1", 0.9)];
+		dedup_by_section(&cfg, &mut results);
+		assert_eq!(results.len(), 2, "disabled -> no collapse");
+	}
 
 	fn ent(id: &str, vector: Vec<f64>, score: f64) -> ScoredEntity {
 		ScoredEntity {
