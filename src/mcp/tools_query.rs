@@ -124,6 +124,13 @@ impl Server {
 		}
 
 		let rcfg = &self.cfg.retrieval;
+		// LLM calls (HyDE expansion, LLM rerank, answer synthesis) only earn
+		// their cost when the caller asked for a synthesized `answer`. With
+		// `answer:false` this stays a fast pure-vector retrieval. Passing the
+		// LLM unconditionally fired several gemma-class generations per query,
+		// overrunning the MCP client timeout (surfaced as a "Connection
+		// closed" -32000 from the proxy).
+		let (llm_arg, embed_arg) = answer_llm_args(answer_on, &llm_fn, &embed_fn);
 		let result = {
 			let g = match self.graph.read() {
 				Ok(g) => g,
@@ -135,8 +142,8 @@ impl Server {
 				&vec,
 				&p.text,
 				mode,
-				Some(&llm_fn),
-				Some(&embed_fn),
+				llm_arg,
+				embed_arg,
 				Some(opts),
 			)
 		};
@@ -207,6 +214,25 @@ impl Server {
 	}
 }
 
+/// Select the optional LLM / embedder handles passed into
+/// [`retrieval::answer::query`] for a `query` tool call.
+///
+/// HyDE expansion, LLM rerank, and answer synthesis are all driven by the
+/// `llm` handle and only matter when the caller requested a synthesized
+/// `answer`. Gating them here keeps `answer:false` a fast pure-vector
+/// retrieval instead of firing several gemma-class generations per query.
+fn answer_llm_args<'a>(
+	answer: bool,
+	llm: &'a LlmFunc,
+	embed: &'a EmbedFunc,
+) -> (Option<&'a LlmFunc>, Option<&'a EmbedFunc>) {
+	if answer {
+		(Some(llm), Some(embed))
+	} else {
+		(None, None)
+	}
+}
+
 fn entity_detail(
 	thought: &crate::base::types::Entity,
 	kern_id: &str,
@@ -245,6 +271,35 @@ fn entity_detail(
 		"kern": kern_id,
 		"edges": edges,
 	})
+}
+
+#[cfg(test)]
+mod answer_gating_tests {
+	//! The `query` tool must not spend LLM calls (HyDE / rerank / answer
+	//! synthesis) unless `answer:true` was requested. Regression guard for
+	//! the unconditional-LLM bug that overran the MCP client timeout and
+	//! surfaced as `-32000 Connection closed`.
+	use super::answer_llm_args;
+	use crate::types::{EmbedFunc, LlmFunc};
+	use std::sync::Arc;
+
+	#[test]
+	fn answer_false_passes_no_llm_or_embedder() {
+		let llm: LlmFunc = Arc::new(|_: &str| String::new());
+		let embed: EmbedFunc = Arc::new(|_: &str| Ok(Vec::new()));
+		let (l, e) = answer_llm_args(false, &llm, &embed);
+		assert!(l.is_none(), "answer:false must not pass an LLM");
+		assert!(e.is_none(), "answer:false must not pass an embedder");
+	}
+
+	#[test]
+	fn answer_true_passes_llm_and_embedder() {
+		let llm: LlmFunc = Arc::new(|_: &str| String::new());
+		let embed: EmbedFunc = Arc::new(|_: &str| Ok(Vec::new()));
+		let (l, e) = answer_llm_args(true, &llm, &embed);
+		assert!(l.is_some(), "answer:true must pass an LLM");
+		assert!(e.is_some(), "answer:true must pass an embedder");
+	}
 }
 
 #[cfg(test)]
