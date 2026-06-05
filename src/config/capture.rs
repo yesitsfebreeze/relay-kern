@@ -29,6 +29,15 @@ pub struct CaptureConfig {
 	pub digest_secs: u64,
 	/// Max thoughts included in the digest.
 	pub digest_k: usize,
+	/// Trust floor for digest inclusion: posterior confidence mean
+	/// (`conf_mean`, the Beta-Bernoulli expectation) a claim must clear to be
+	/// re-injected into the SessionStart digest. The digest is a persistent
+	/// re-injection surface — a poisoned/low-trust claim that lands here is
+	/// replayed into every future session. Gating it here quarantines
+	/// low-trust and repeatedly-contradicted claims (whose `conf_beta` has
+	/// grown, dragging the mean down) out of that surface. Set to `0.0` to
+	/// disable the gate. Default `0.35`.
+	pub digest_min_trust: f32,
 	/// Retention window, in seconds, for archived deltas under `<dir>/done/`.
 	/// The graph is the durable copy after ingest; the archive is only a
 	/// transient audit trail, so it is swept each drain cycle and entries older
@@ -45,6 +54,7 @@ impl Default for CaptureConfig {
 			digest_path: ".kern/digest.md".into(),
 			digest_secs: 30,
 			digest_k: 40,
+			digest_min_trust: 0.35,
 			done_retention_secs: 7 * 24 * 60 * 60,
 		}
 	}
@@ -63,6 +73,7 @@ mod tests {
 		assert_eq!(c.digest_path, ".kern/digest.md");
 		assert_eq!(c.digest_secs, 30);
 		assert_eq!(c.digest_k, 40);
+		assert_eq!(c.digest_min_trust, 0.35);
 		assert_eq!(c.done_retention_secs, 7 * 24 * 60 * 60);
 	}
 }

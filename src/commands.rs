@@ -29,10 +29,10 @@ pub struct Cli {
 	#[arg(long)]
 	pub mcp_stdio: bool,
 
-	#[arg(long, default_value = "http://localhost:11434")]
+	#[arg(long, default_value = crate::config::DEFAULT_EMBED_URL)]
 	pub embed_url: String,
 
-	#[arg(long, default_value = "nomic-embed-text")]
+	#[arg(long, default_value = crate::config::DEFAULT_EMBED_MODEL)]
 	pub embed_model: String,
 
 	#[arg(long, default_value = "")]
@@ -368,8 +368,8 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 				daemon: true,
 				mcp_addr: String::new(),
 				mcp_stdio: false,
-				embed_url: "http://localhost:11434".to_string(),
-				embed_model: "nomic-embed-text".to_string(),
+				embed_url: crate::config::DEFAULT_EMBED_URL.to_string(),
+				embed_model: crate::config::DEFAULT_EMBED_MODEL.to_string(),
 				reason_url: String::new(),
 				reason_model: String::new(),
 			};
@@ -534,12 +534,13 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 			let digest_path = cwd.join(&cfg.capture.digest_path);
 			let g_digest = g.clone();
 			let k = cfg.capture.digest_k;
+			let min_trust = cfg.capture.digest_min_trust as f64;
 			let every = std::time::Duration::from_secs(cfg.capture.digest_secs);
 			tokio::spawn(async move {
 				loop {
 					{
 						let g = read_recovered(&g_digest);
-						crate::retrieval::digest::write_digest(&g, &digest_path, k);
+						crate::retrieval::digest::write_digest(&g, &digest_path, k, min_trust);
 					}
 					tokio::time::sleep(every).await;
 				}

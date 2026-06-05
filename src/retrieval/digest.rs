@@ -7,7 +7,13 @@ use crate::base::types::{Entity, EntityKind, EntityStatus};
 
 /// Render the digest markdown: purpose header + up to `k` hottest active
 /// thoughts, hottest first.
-pub fn build_digest(graph: &GraphGnn, k: usize) -> String {
+///
+/// `min_trust` is a posterior-confidence floor (`Entity::conf_mean`): claims
+/// below it are quarantined out of the digest. The digest is replayed into
+/// every future session, so it is the persistent re-injection surface for
+/// memory-poisoning — gating it keeps low-trust and repeatedly-contradicted
+/// claims off that surface. Pass `0.0` to disable the gate.
+pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64) -> String {
 	let mut out = String::from("# kern memory\n\n");
 	let purpose = graph.root.purpose_text.trim();
 	if !purpose.is_empty() {
@@ -24,6 +30,7 @@ pub fn build_digest(graph: &GraphGnn, k: usize) -> String {
 			matches!(e.status, EntityStatus::Active)
 				&& !matches!(e.kind, EntityKind::Document | EntityKind::Question)
 				&& e.statements.first().is_some_and(|s| !s.trim().is_empty())
+				&& e.conf_mean() >= min_trust
 		})
 		.collect();
 	ents.sort_by(|a, b| {
@@ -47,11 +54,11 @@ pub fn build_digest(graph: &GraphGnn, k: usize) -> String {
 }
 
 /// Render and write the digest to `path`, creating parent dirs. Best effort.
-pub fn write_digest(graph: &GraphGnn, path: &std::path::Path, k: usize) {
+pub fn write_digest(graph: &GraphGnn, path: &std::path::Path, k: usize, min_trust: f64) {
 	if let Some(parent) = path.parent() {
 		let _ = std::fs::create_dir_all(parent);
 	}
-	if let Err(e) = std::fs::write(path, build_digest(graph, k)) {
+	if let Err(e) = std::fs::write(path, build_digest(graph, k, min_trust)) {
 		tracing::warn!(target: "kern.digest", path = %path.display(), error = %e, "digest write failed");
 	}
 }
@@ -60,48 +67,7 @@ pub fn write_digest(graph: &GraphGnn, path: &std::path::Path, k: usize) {
 mod tests {
 	use super::*;
 	use crate::base::graph::GraphGnn;
-	use crate::base::types::{
-		Acl, ChunkPart, ChunkPartKind, Entity, EntityKind, EntityStatus, Source,
-	};
-	use crate::crdt::GCounter;
-
-	fn mk_entity(id: &str, text: &str, heat: f64, kind: EntityKind) -> Entity {
-		let mut e = Entity {
-			id: id.to_string(),
-			root_id: String::new(),
-			external_id: String::new(),
-			superseded_by: String::new(),
-			kind,
-			status: EntityStatus::Active,
-			statements: vec![text.to_string()],
-			chunks: vec![ChunkPart {
-				kind: ChunkPartKind::StatementRef,
-				text: String::new(),
-				index: 0,
-			}],
-			vector: vec![0.0; 8],
-			gnn_vector: Vec::new(),
-			score: 0.0,
-			conf_alpha: 2.0,
-			conf_beta: 1.0,
-			source: Source::Inline {
-				hash: id.into(),
-				section: String::new(),
-			},
-			created_at: None,
-			acl: Acl::default(),
-			access_count: GCounter::new(),
-			accessed_at: None,
-			heat: heat as f32,
-			heat_updated_at: None,
-			updated_at: None,
-			valid_until: None,
-			producer_id: String::new(),
-			unlinked_count: 0,
-		};
-		e.refresh_score();
-		e
-	}
+	use crate::base::types::{mk_entity, EntityKind};
 
 	#[test]
 	fn digest_has_purpose_and_hottest_first_capped() {
@@ -112,7 +78,7 @@ mod tests {
 		kern.entities.insert("a".into(), mk_entity("a", "cold fact", 0.1, EntityKind::Claim));
 		kern.entities.insert("b".into(), mk_entity("b", "hot fact", 9.0, EntityKind::Claim));
 
-		let md = build_digest(&g, 1);
+		let md = build_digest(&g, 1, 0.0);
 		assert!(md.contains("remember durable facts"), "purpose present");
 		assert!(md.contains("hot fact"), "hottest included");
 		assert!(!md.contains("cold fact"), "capped at k=1");
@@ -126,7 +92,7 @@ mod tests {
 		kern.entities.insert("doc".into(), mk_entity("doc", "raw document chunk", 9.0, EntityKind::Document));
 		kern.entities.insert("clm".into(), mk_entity("clm", "a distilled claim", 0.5, EntityKind::Claim));
 
-		let md = build_digest(&g, 10);
+		let md = build_digest(&g, 10, 0.0);
 		assert!(md.contains("a distilled claim"), "claim kept");
 		assert!(!md.contains("raw document chunk"), "document excluded even though hotter");
 	}
@@ -134,7 +100,32 @@ mod tests {
 	#[test]
 	fn empty_graph_yields_header_only() {
 		let g = GraphGnn::default();
-		let md = build_digest(&g, 10);
+		let md = build_digest(&g, 10, 0.0);
 		assert!(md.contains("# kern memory"));
+	}
+
+	#[test]
+	fn low_trust_claim_quarantined_even_when_hottest() {
+		let mut g = GraphGnn::default();
+		let root_id = g.root.id.clone();
+		let kern = g.kerns.get_mut(&root_id).expect("root kern");
+		// Hottest entity, but repeatedly contradicted → low posterior trust.
+		let mut poisoned = mk_entity("p", "poisoned hot claim", 99.0, EntityKind::Claim);
+		poisoned.conf_alpha = 1.0;
+		poisoned.conf_beta = 9.0; // conf_mean = 0.1
+		poisoned.refresh_score();
+		kern.entities.insert("p".into(), poisoned);
+		kern.entities
+			.insert("t".into(), mk_entity("t", "trusted cool claim", 0.5, EntityKind::Claim));
+
+		// Gate at 0.35: poisoned (0.1) quarantined despite being hottest;
+		// trusted (mk_entity mean 0.667) survives.
+		let gated = build_digest(&g, 10, 0.35);
+		assert!(!gated.contains("poisoned hot claim"), "low-trust claim quarantined");
+		assert!(gated.contains("trusted cool claim"), "trusted claim kept");
+
+		// Gate off: poisoned claim re-injected (hottest first).
+		let ungated = build_digest(&g, 10, 0.0);
+		assert!(ungated.contains("poisoned hot claim"), "gate off → re-injected");
 	}
 }
