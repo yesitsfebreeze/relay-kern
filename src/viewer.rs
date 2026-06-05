@@ -237,8 +237,8 @@ fn rank_peers(peers: &[(String, Value)], k: usize) -> Vec<Value> {
 		merge_search_hits(tag, v, &mut out);
 	}
 	out.sort_by(|a, b| {
-		let sa = a.get("score").and_then(Value::as_f64).unwrap_or(0.0);
-		let sb = b.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+		let sa = a.get("score").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY);
+		let sb = b.get("score").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY);
 		sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
 	});
 	out.truncate(k);
