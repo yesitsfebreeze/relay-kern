@@ -1,6 +1,7 @@
 pub mod accept;
 pub mod cold;
 pub mod constants;
+pub mod diskann;
 pub mod graph;
 pub mod heat;
 pub mod hnsw;

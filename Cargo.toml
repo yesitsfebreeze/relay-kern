@@ -77,6 +77,7 @@ harness = false
 [dependencies]
 config-io = { path = "shared/config-io" }
 dirs = "6"
+memmap2 = "0.9"
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 rand.workspace = true
