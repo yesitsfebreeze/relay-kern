@@ -337,19 +337,24 @@ fn supersede(
 }
 
 pub fn get_or_spawn_unnamed_child(g: &mut GraphGnn, kern_id: &str) -> String {
+	// Use `get` (auto-loads from disk), NOT `loaded` (in-memory only): under the
+	// kern-load cap an existing unnamed child may be evicted to disk. Checking
+	// only loaded kerns made this spawn a fresh unnamed child every call once the
+	// cap started evicting — a runaway that filled the graph to `max_kerns`
+	// unnamed kerns. Auto-loading finds and reuses the existing child instead.
 	let children = g
-		.loaded(kern_id)
+		.get(kern_id)
 		.map(|k| k.children.clone())
 		.unwrap_or_default();
 	for child_id in &children {
-		if let Some(c) = g.loaded(child_id) {
+		if let Some(c) = g.get(child_id) {
 			if c.is_unnamed() {
 				return child_id.clone();
 			}
 		}
 	}
 	let root_id = g
-		.loaded(kern_id)
+		.get(kern_id)
 		.map(|k| k.root_id.clone())
 		.unwrap_or_default();
 	let child = Kern::new_unnamed(kern_id, &root_id);
@@ -402,6 +407,26 @@ mod tests {
 			statements: vec!["x".into()],
 			..Default::default()
 		}
+	}
+
+	#[test]
+	fn unnamed_child_reused_when_evicted_by_load_cap() {
+		// Regression: under the kern-load cap, the unnamed child is evicted to
+		// disk; `get_or_spawn_unnamed_child` must reload and REUSE it, not spawn
+		// a fresh one each call (which previously ran the graph away to the cap).
+		let dir = tempfile::tempdir().unwrap();
+		let mut g = GraphGnn::new();
+		g.data_dir = dir.path().to_string_lossy().into_owned();
+		g.set_max_loaded_kerns(1); // only the root stays resident → child evicts
+		let root = g.root.id.clone();
+
+		let first = get_or_spawn_unnamed_child(&mut g, &root);
+		for _ in 0..20 {
+			let id = get_or_spawn_unnamed_child(&mut g, &root);
+			assert_eq!(id, first, "must reuse the evicted unnamed child");
+		}
+		// Exactly one unnamed child ever created (root + 1), no runaway.
+		assert_eq!(g.count(), 2, "no runaway kern creation under the cap");
 	}
 
 	#[test]
