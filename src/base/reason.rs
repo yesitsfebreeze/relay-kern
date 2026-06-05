@@ -19,7 +19,16 @@ pub fn add_reason(kern: &mut Kern, reason: Reason) {
 	let id = reason.id.clone();
 	let from = reason.from.clone();
 	let to = reason.to.clone();
-	kern.reasons.insert(id.clone(), reason);
+	// Index the adjacency lists only when the id is NEW. `reasons` is a map
+	// (idempotent), but `by_from`/`by_to` are Vecs: re-adding the same edge id
+	// (idempotent re-observe — Rephrase edges, move_entity round-trips,
+	// re-ingest) would otherwise append a duplicate id, double-counting it in
+	// `collect_reason_ids` and leaving a stale entry after `remove_reason`
+	// (which removes only the first occurrence).
+	let is_new = kern.reasons.insert(id.clone(), reason).is_none();
+	if !is_new {
+		return;
+	}
 	kern.by_from.entry(from).or_default().push(id.clone());
 	if !to.is_empty() {
 		kern.by_to.entry(to).or_default().push(id);
@@ -223,5 +232,52 @@ fn remove_string_from_vec(vec: Option<&mut Vec<String>>, s: &str) {
 		if let Some(pos) = v.iter().position(|x| x == s) {
 			v.remove(pos);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::types::{Kern, Reason};
+
+	fn edge(from: &str, to: &str) -> Reason {
+		Reason {
+			from: from.into(),
+			to: to.into(),
+			id: format!("{from}->{to}"),
+			..Default::default()
+		}
+	}
+
+	#[test]
+	fn add_reason_is_idempotent_on_adjacency() {
+		// Card #56: re-adding the same edge id must NOT duplicate it in the
+		// by_from/by_to adjacency lists.
+		let mut k = Kern::new("k", "");
+		add_reason(&mut k, edge("a", "b"));
+		add_reason(&mut k, edge("a", "b")); // same content-hash id
+		add_reason(&mut k, edge("a", "b"));
+
+		assert_eq!(k.reasons.len(), 1, "one reason in the map");
+		assert_eq!(k.by_from.get("a").map(|v| v.len()), Some(1), "no dup in by_from");
+		assert_eq!(k.by_to.get("b").map(|v| v.len()), Some(1), "no dup in by_to");
+		// collect_reason_ids returns the edge exactly once.
+		assert_eq!(collect_reason_ids(&k, "a"), vec!["a->b".to_string()]);
+	}
+
+	#[test]
+	fn remove_after_reobserve_fully_clears_adjacency() {
+		// With the idempotent add, a single remove leaves no stale dangling id.
+		let mut k = Kern::new("k", "");
+		add_reason(&mut k, edge("a", "b"));
+		add_reason(&mut k, edge("a", "b")); // re-observe
+		remove_reason(&mut k, "a->b");
+
+		assert!(k.reasons.is_empty(), "reason removed from map");
+		assert!(
+			k.by_from.get("a").map(|v| v.is_empty()).unwrap_or(true),
+			"no stale id left in by_from"
+		);
+		assert!(collect_reason_ids(&k, "a").is_empty(), "no dangling edge id");
 	}
 }
