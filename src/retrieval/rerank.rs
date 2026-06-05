@@ -83,3 +83,46 @@ pub fn parse_ranking(response: &str, pool: usize) -> Option<Vec<usize>> {
 		Some(out)
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::parse_ranking;
+
+	#[test]
+	fn parses_clean_array() {
+		assert_eq!(parse_ranking("[2,0,1]", 3), Some(vec![2, 0, 1]));
+	}
+
+	#[test]
+	fn tolerates_surrounding_prose() {
+		assert_eq!(parse_ranking("Ranking: [1,0] done", 2), Some(vec![1, 0]));
+	}
+
+	#[test]
+	fn filters_out_of_range_indices() {
+		// 5 >= pool(2) is dropped; 0 kept.
+		assert_eq!(parse_ranking("[5,0]", 2), Some(vec![0]));
+	}
+
+	#[test]
+	fn negative_index_is_filtered_not_panic() {
+		// -1 as usize is huge -> filtered by the `< pool` check, no panic.
+		assert_eq!(parse_ranking("[-1,1]", 2), Some(vec![1]));
+	}
+
+	#[test]
+	fn no_brackets_is_none() {
+		assert_eq!(parse_ranking("no ranking here", 3), None);
+	}
+
+	#[test]
+	fn empty_array_is_none() {
+		assert_eq!(parse_ranking("[]", 3), None);
+	}
+
+	#[test]
+	fn non_integer_element_discards_ranking() {
+		// A malformed element bails the whole ranking (don't trust a partial).
+		assert_eq!(parse_ranking("[1.5, 0]", 3), None);
+	}
+}
