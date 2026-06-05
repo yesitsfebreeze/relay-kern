@@ -119,3 +119,45 @@ impl Backward for LayerNorm {
 		self.d_beta = Tensor::zeros(1, self.dim);
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn forward_normalizes_each_row() {
+		let mut ln = LayerNorm::new(3); // gamma=1, beta=0 -> output is x_hat
+		let x = Tensor::new(1, 3, vec![1.0, 2.0, 3.0]).unwrap();
+		let out = ln.forward(&x);
+		let mean: f64 = out.data.iter().sum::<f64>() / 3.0;
+		assert!(mean.abs() < 1e-9, "row mean ~0, got {mean}");
+		let var: f64 = out.data.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / 3.0;
+		assert!((var - 1.0).abs() < 1e-3, "row var ~1 (minus epsilon), got {var}");
+	}
+
+	#[test]
+	fn backward_matches_numeric() {
+		let x = Tensor::new(2, 4, vec![0.5, -0.2, 0.1, 0.3, -0.4, 0.6, 0.2, -0.1]).unwrap();
+		const H: f64 = 1e-6;
+		let mut ln = LayerNorm::new(4);
+		let out = ln.forward(&x);
+		let d_out = Tensor::ones(out.rows, out.cols);
+		let d_in = ln.backward(&d_out); // loss = sum(output)
+
+		for idx in 0..x.data.len() {
+			let mut xp = x.clone();
+			xp.data[idx] += H;
+			let sp = LayerNorm::new(4).forward(&xp).sum_all();
+			let mut xm = x.clone();
+			xm.data[idx] -= H;
+			let sm = LayerNorm::new(4).forward(&xm).sum_all();
+			let num = (sp - sm) / (2.0 * H);
+			let den = 1.0_f64.max(d_in.data[idx].abs()).max(num.abs());
+			assert!(
+				(d_in.data[idx] - num).abs() / den < 1e-4,
+				"d_input[{idx}]: analytic {} vs numeric {num}",
+				d_in.data[idx]
+			);
+		}
+	}
+}

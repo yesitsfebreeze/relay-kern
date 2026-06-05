@@ -117,3 +117,41 @@ impl Optimizer for Adam {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn scalar(v: f64) -> Tensor {
+		Tensor::new(1, 1, vec![v]).unwrap()
+	}
+
+	#[test]
+	fn sgd_plain_step() {
+		let mut p = scalar(1.0);
+		let g = scalar(0.5);
+		let mut opt = SGD::new(0.1);
+		opt.step(&mut [&mut p], &[&g]);
+		assert!((p.data[0] - 0.95).abs() < 1e-12); // 1.0 - 0.1*0.5
+	}
+
+	#[test]
+	fn sgd_momentum_accumulates() {
+		let mut p = scalar(0.0);
+		let g = scalar(1.0);
+		let mut opt = SGD::with_momentum(0.1, 0.9);
+		opt.step(&mut [&mut p], &[&g]); // v=1.0   -> p -= 0.1   => -0.10
+		opt.step(&mut [&mut p], &[&g]); // v=1.9   -> p -= 0.19  => -0.29
+		assert!((p.data[0] - (-0.29)).abs() < 1e-12);
+	}
+
+	#[test]
+	fn adam_first_step_is_lr_scaled_sign() {
+		// At t=1 the bias-corrected update is lr * g / (|g| + eps) ~= lr*sign(g).
+		let mut p = scalar(0.0);
+		let g = scalar(2.0);
+		let mut opt = Adam::new(0.1);
+		opt.step(&mut [&mut p], &[&g]);
+		assert!((p.data[0] - (-0.1)).abs() < 1e-6, "got {}", p.data[0]);
+	}
+}

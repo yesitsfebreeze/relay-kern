@@ -79,3 +79,50 @@ pub fn pagerank(g: &GraphGnn, damping: f64, iters: usize, top_k: usize) -> Vec<E
 	}
 	out_list
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::types::{Entity, Kern, Reason};
+
+	fn ent(id: &str) -> Entity {
+		Entity {
+			id: id.into(),
+			..Default::default()
+		}
+	}
+	fn edge(from: &str, to: &str) -> Reason {
+		Reason {
+			from: from.into(),
+			to: to.into(),
+			id: format!("{from}->{to}"),
+			..Default::default()
+		}
+	}
+
+	#[test]
+	fn empty_graph_is_empty() {
+		assert!(pagerank(&GraphGnn::new(), 0.85, 10, 5).is_empty());
+	}
+
+	#[test]
+	fn ranks_hub_above_leaves_and_sums_to_one() {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		for id in ["A", "B", "C"] {
+			k.entities.insert(id.into(), ent(id));
+		}
+		// B -> A and C -> A : A is the hub.
+		for e in [edge("B", "A"), edge("C", "A")] {
+			k.reasons.insert(e.id.clone(), e);
+		}
+		g.register(k);
+
+		let ranks = pagerank(&g, 0.85, 100, 3);
+		assert_eq!(ranks.len(), 3);
+		let score = |id: &str| ranks.iter().find(|h| h.entity_id == id).unwrap().score;
+		assert!(score("A") > score("B"), "hub A must outrank leaf B");
+		let sum: f64 = ranks.iter().map(|h| h.score).sum();
+		assert!((sum - 1.0).abs() < 1e-6, "ranks sum ~1, got {sum}");
+	}
+}
