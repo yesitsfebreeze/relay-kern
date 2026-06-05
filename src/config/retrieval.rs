@@ -59,6 +59,11 @@ pub struct RetrievalConfig {
 	pub rerank_pool_size: usize,
 	pub hyde_enabled: bool,
 	pub hyde_min_query_tokens: usize,
+	/// Weight on the hypothetical-document vector when HyDE fuses it with the
+	/// raw query vector: `fused = query*(1-w) + hypo*w`, then L2-normalized.
+	/// `0.5` is the symmetric blend (original behavior); higher trusts the
+	/// generated hypo more, lower stays closer to the literal query.
+	pub hyde_fusion_weight: f64,
 	pub lexical_enabled: bool,
 	pub bm25_k1: f64,
 	pub bm25_b: f64,
@@ -120,6 +125,7 @@ impl Default for RetrievalConfig {
 			rerank_pool_size: 30,
 			hyde_enabled: true,
 			hyde_min_query_tokens: 6,
+			hyde_fusion_weight: 0.5,
 			lexical_enabled: true,
 			bm25_k1: 1.2,
 			bm25_b: 0.75,

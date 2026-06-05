@@ -33,10 +33,11 @@ if !cfg.hyde_enabled {
 		return query_vec.to_vec();
 	}
 
+	let w = cfg.hyde_fusion_weight;
 	let mut fused: Vec<f64> = query_vec
 		.iter()
 		.zip(hypo_vec.iter())
-		.map(|(a, b)| (a + b) * 0.5)
+		.map(|(q, h)| q * (1.0 - w) + h * w)
 		.collect();
 	l2_normalize(&mut fused);
 	fused
@@ -92,6 +93,21 @@ mod tests {
 		assert!((out[0] - out[1]).abs() < 1e-9);
 		let norm: f64 = out.iter().map(|x| x * x).sum::<f64>().sqrt();
 		assert!((norm - 1.0).abs() < 1e-9, "fused vector is L2-normalized");
+	}
+
+	#[test]
+	fn fusion_weight_one_yields_pure_hypo_direction() {
+		// w=1.0 → fused = hypo (then L2-normalized): drops the query component.
+		let cfg = RetrievalConfig {
+			hyde_fusion_weight: 1.0,
+			..Default::default()
+		};
+		let llm: LlmFunc = Arc::new(|_: &str| "answer".to_string());
+		let embed: EmbedFunc = Arc::new(|_: &str| Ok(vec![0.0, 3.0]));
+		let qv = vec![1.0, 0.0];
+		let out = expand_query(&cfg, Some(&llm), Some(&embed), &qv, "cat");
+		// pure hypo (0,3) normalized → (0,1).
+		assert!(out[0].abs() < 1e-9 && (out[1] - 1.0).abs() < 1e-9);
 	}
 
 	#[test]
