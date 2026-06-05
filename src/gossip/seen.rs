@@ -1,53 +1,156 @@
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::base::constants::{GOSSIP_SEEN_SET_CAP, GOSSIP_SEEN_TTL};
 
-struct Entry {
-	id: String,
-	expires: Instant,
-}
-
+/// Loop-suppression set for gossip message ids.
+///
+/// Membership is O(1) via a `HashMap<id, expiry>`. A parallel insertion-order
+/// `VecDeque` lets us reclaim memory in O(1) amortised: because the TTL is a
+/// constant, expiry is monotonic in insertion order, so expired entries always
+/// sit at the front. Live entries are only ever evicted under a genuine flood
+/// of more than `GOSSIP_SEEN_SET_CAP` distinct ids within one TTL window
+/// (oldest-first), which bounds memory; normal traffic never hits the cap and
+/// never evicts a still-live id (unlike the previous fixed ring, which
+/// overwrote by slot position regardless of expiry).
 pub struct SeenSet {
-	entries: Mutex<SeenInner>,
+	inner: Mutex<SeenInner>,
 }
 
 struct SeenInner {
-	buf: Vec<Option<Entry>>,
-	head: usize,
+	live: HashMap<String, Instant>,
+	order: VecDeque<(String, Instant)>,
 }
 
 impl SeenSet {
 	pub fn new() -> Self {
-		let mut buf = Vec::with_capacity(GOSSIP_SEEN_SET_CAP);
-		buf.resize_with(GOSSIP_SEEN_SET_CAP, || None);
 		Self {
-			entries: Mutex::new(SeenInner { buf, head: 0 }),
+			inner: Mutex::new(SeenInner {
+				live: HashMap::with_capacity(GOSSIP_SEEN_SET_CAP),
+				order: VecDeque::with_capacity(GOSSIP_SEEN_SET_CAP),
+			}),
 		}
 	}
 
+	/// Record `id` and report whether it was already seen and still live (the
+	/// caller should then suppress the message). O(1) amortised.
 	pub fn add_and_check(&self, id: &str) -> bool {
-		let mut inner = self.entries.lock().unwrap();
-		let now = Instant::now();
+		self.add_and_check_at(id, Instant::now())
+	}
 
-		for entry in inner.buf.iter().flatten() {
-			if entry.id == id && entry.expires > now {
+	/// Clock-injected core of [`add_and_check`], for deterministic tests.
+	fn add_and_check_at(&self, id: &str, now: Instant) -> bool {
+		let mut inner = self.inner.lock().unwrap();
+
+		// O(1) membership: already seen and not yet expired.
+		if let Some(&expires) = inner.live.get(id) {
+			if expires > now {
 				return true;
 			}
 		}
 
-		let head = inner.head;
-		inner.buf[head] = Some(Entry {
-			id: id.to_string(),
-			expires: now + GOSSIP_SEEN_TTL,
-		});
-		inner.head = (head + 1) % GOSSIP_SEEN_SET_CAP;
+		// Reclaim expired entries from the front (expiry is monotonic).
+		while inner.order.front().is_some_and(|(_, exp)| *exp <= now) {
+			let (fid, fexp) = inner.order.pop_front().unwrap();
+			// Skip stale duplicates left by a re-insert after expiry.
+			if inner.live.get(&fid) == Some(&fexp) {
+				inner.live.remove(&fid);
+			}
+		}
+
+		// Hard count ceiling: under a flood of live unique ids, evict oldest.
+		while inner.order.len() >= GOSSIP_SEEN_SET_CAP {
+			let Some((fid, fexp)) = inner.order.pop_front() else {
+				break;
+			};
+			if inner.live.get(&fid) == Some(&fexp) {
+				inner.live.remove(&fid);
+			}
+		}
+
+		let expires = now + GOSSIP_SEEN_TTL;
+		inner.live.insert(id.to_string(), expires);
+		inner.order.push_back((id.to_string(), expires));
 		false
+	}
+
+	#[cfg(test)]
+	fn len(&self) -> usize {
+		self.inner.lock().unwrap().live.len()
 	}
 }
 
 impl Default for SeenSet {
 	fn default() -> Self {
 		Self::new()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::time::Duration;
+
+	#[test]
+	fn first_sight_is_new_repeat_is_seen() {
+		let s = SeenSet::new();
+		let t0 = Instant::now();
+		assert!(!s.add_and_check_at("a", t0), "first sight is new");
+		assert!(s.add_and_check_at("a", t0), "repeat within TTL is suppressed");
+	}
+
+	#[test]
+	fn distinct_ids_are_each_new() {
+		let s = SeenSet::new();
+		let t0 = Instant::now();
+		assert!(!s.add_and_check_at("a", t0));
+		assert!(!s.add_and_check_at("b", t0));
+		assert!(!s.add_and_check_at("c", t0));
+	}
+
+	#[test]
+	fn entry_expires_after_ttl() {
+		let s = SeenSet::new();
+		let t0 = Instant::now();
+		assert!(!s.add_and_check_at("a", t0));
+		// Still live just before TTL.
+		assert!(s.add_and_check_at("a", t0 + GOSSIP_SEEN_TTL - Duration::from_millis(1)));
+		// Expired past TTL -> treated as new again, and reclaimed.
+		let past = t0 + GOSSIP_SEEN_TTL + Duration::from_secs(1);
+		assert!(!s.add_and_check_at("a", past));
+		assert!(s.add_and_check_at("a", past), "re-recorded after expiry");
+	}
+
+	#[test]
+	fn expired_entries_are_reclaimed_not_accumulated() {
+		let s = SeenSet::new();
+		let t0 = Instant::now();
+		for i in 0..1000 {
+			// Each id one second apart; all but the last expire as time advances.
+			let now = t0 + Duration::from_secs(i);
+			s.add_and_check_at(&format!("id{i}"), now);
+		}
+		// At the last timestamp, only ids within the TTL window remain live.
+		let live = s.len();
+		assert!(
+			live <= (GOSSIP_SEEN_TTL.as_secs() as usize) + 2,
+			"expired entries must be reclaimed, got {live} live"
+		);
+	}
+
+	#[test]
+	fn count_is_bounded_under_flood_recent_id_survives() {
+		let s = SeenSet::new();
+		let t0 = Instant::now();
+		// Flood more than CAP distinct ids within the same instant (all live).
+		for i in 0..(GOSSIP_SEEN_SET_CAP + 500) {
+			s.add_and_check_at(&format!("f{i}"), t0);
+		}
+		assert!(s.len() <= GOSSIP_SEEN_SET_CAP, "count must stay bounded");
+		// The most recently inserted id is still live (recent entries survive;
+		// only the oldest are evicted under flood).
+		let last = format!("f{}", GOSSIP_SEEN_SET_CAP + 499);
+		assert!(s.add_and_check_at(&last, t0), "recent id must survive the flood");
 	}
 }
