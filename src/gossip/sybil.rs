@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::base::locks::lock_recovered;
 use crate::base::search::EntityHit;
+use crate::base::util::cmp_partial;
 
 pub struct RateClipper {
 	state: Mutex<HashMap<String, PeerBucket>>,
@@ -36,7 +38,7 @@ impl RateClipper {
 		if self.max_per_window == 0 {
 			return true;
 		}
-		let mut state = self.state.lock().unwrap();
+		let mut state = lock_recovered(&self.state);
 		let bucket = state.entry(peer.to_string()).or_insert(PeerBucket {
 			count: 0,
 			window_start: now,
@@ -72,7 +74,7 @@ pub fn trimmed_mean(values: &[f64], trim_pct: f64) -> Option<f64> {
 	if sorted.is_empty() {
 		return None;
 	}
-	sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+	sorted.sort_by(|a, b| cmp_partial(a, b));
 	let m = sorted.len();
 	let k = ((m as f64) * pct).floor() as usize;
 	if 2 * k >= m {

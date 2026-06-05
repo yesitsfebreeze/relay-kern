@@ -4,6 +4,7 @@ use std::sync::RwLock;
 use std::time::Instant;
 
 use crate::base::constants::{LEDGER_ROUTING_TTL, LEDGER_THOUGHT_TTL};
+use crate::base::locks::{read_recovered, write_recovered};
 
 const DEFAULT_LEDGER_CAP: usize = 10_000;
 
@@ -36,7 +37,7 @@ impl Ledger {
 	}
 
 	pub fn put_thought(&self, id: &str, addr: &str) {
-		let mut m = self.entities.write().unwrap();
+		let mut m = write_recovered(&self.entities);
 		evict_if_full(&mut m, self.cap());
 		m.insert(
 			id.to_string(),
@@ -48,7 +49,7 @@ impl Ledger {
 	}
 
 	pub fn put_routing(&self, kern_id: &str, addr: &str) {
-		let mut m = self.routing.write().unwrap();
+		let mut m = write_recovered(&self.routing);
 		evict_if_full(&mut m, self.cap());
 		m.insert(
 			kern_id.to_string(),
@@ -60,7 +61,7 @@ impl Ledger {
 	}
 
 	pub fn lookup_thought(&self, id: &str) -> Option<String> {
-		let m = self.entities.read().unwrap();
+		let m = read_recovered(&self.entities);
 		m.get(id).and_then(|e| {
 			if e.expires > Instant::now() {
 				Some(e.addr.clone())
@@ -71,7 +72,7 @@ impl Ledger {
 	}
 
 	pub fn lookup_routing(&self, kern_id: &str) -> Option<String> {
-		let m = self.routing.read().unwrap();
+		let m = read_recovered(&self.routing);
 		m.get(kern_id).and_then(|e| {
 			if e.expires > Instant::now() {
 				Some(e.addr.clone())

@@ -2,6 +2,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::base::constants::*;
 use crate::base::graph::GraphGnn;
+use crate::base::locks::{read_recovered, write_recovered};
 use crate::base::search::search_all_unlocked;
 use crate::base::types::{Kern, ReasonKind};
 use crate::crdt::GCounter;
@@ -59,7 +60,7 @@ pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 			tokio::select! {
 				_ = interval.tick() => {
 					let payload = {
-						let g = graph.read().unwrap();
+						let g = read_recovered(&graph);
 						// Nothing worth announcing until the kern has a purpose.
 						if g.root.purpose_vec.is_empty() {
 							None
@@ -76,10 +77,7 @@ pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 						}
 					};
 					if let Some(payload) = payload {
-						let stamp = std::time::SystemTime::now()
-							.duration_since(std::time::UNIX_EPOCH)
-							.map(|d| d.as_nanos())
-							.unwrap_or(0);
+						let stamp = crate::base::util::now_nanos();
 						let msg = GossipMessage {
 							kind: GossipKind::Sphere,
 							id: format!("sphere-{}-{}", node.addr(), stamp),
@@ -108,7 +106,7 @@ pub fn start_entity_sync(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 			tokio::select! {
 				_ = interval.tick() => {
 					let payload = {
-						let g = graph.read().unwrap();
+						let g = read_recovered(&graph);
 						let mut entities: Vec<crate::base::types::Entity> = g
 							.kerns
 							.iter()
@@ -130,10 +128,7 @@ pub fn start_entity_sync(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 						}
 					};
 					if let Some(payload) = payload {
-						let stamp = std::time::SystemTime::now()
-							.duration_since(std::time::UNIX_EPOCH)
-							.map(|d| d.as_nanos())
-							.unwrap_or(0);
+						let stamp = crate::base::util::now_nanos();
 						let msg = GossipMessage {
 							kind: GossipKind::EntitySync,
 							id: format!("esync-{}-{}", node.addr(), stamp),
@@ -156,7 +151,7 @@ fn handle_sphere(d: &Deps, msg: GossipMessage) {
 	};
 
 	if !sphere.network_id.is_empty() {
-		let mut g = d.graph.write().unwrap();
+		let mut g = write_recovered(&d.graph);
 		if sphere.network_id != g.network_id {
 			inject_remote_scope(&mut g, sphere, &msg.origin);
 		}
@@ -166,7 +161,7 @@ fn handle_sphere(d: &Deps, msg: GossipMessage) {
 	}
 
 	if let Some(q) = &d.queue {
-		let mut g = d.graph.write().unwrap();
+		let mut g = write_recovered(&d.graph);
 		let root_id = g.root.id.clone();
 		tick::pulse::pulse(q, &mut g, &root_id, PULSE_THRESHOLD * 2.0);
 	}
@@ -182,7 +177,7 @@ fn handle_answer(d: &Deps, msg: GossipMessage) {
 	resolve_question_from_peer(d, reason_id, sphere, &msg.origin);
 
 	if let Some(q) = &d.queue {
-		let mut g = d.graph.write().unwrap();
+		let mut g = write_recovered(&d.graph);
 		let root_id = g.root.id.clone();
 		tick::pulse::pulse(q, &mut g, &root_id, PULSE_THRESHOLD * 2.0);
 	}
@@ -198,7 +193,7 @@ fn handle_question(d: &Deps, msg: GossipMessage) {
 		return;
 	}
 
-	let g = d.graph.read().unwrap();
+	let g = read_recovered(&d.graph);
 	let hits = search_all_unlocked(&g, &question.reason_vec, 1);
 	if hits.is_empty() || hits[0].score < QUESTION_RESOLVE_THRESHOLD {
 		return;
@@ -233,7 +228,7 @@ fn handle_pulse(d: &Deps, msg: GossipMessage) {
 		None => return,
 	};
 
-	let mut g = d.graph.write().unwrap();
+	let mut g = write_recovered(&d.graph);
 	let kern_id = if g.kerns.contains_key(&pulse.kern_id) {
 		pulse.kern_id.clone()
 	} else {
@@ -295,7 +290,7 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 	let mut incoming = GCounter::new();
 	incoming.increment(&delta.replica, value);
 
-	let mut g = d.graph.write().unwrap();
+	let mut g = write_recovered(&d.graph);
 	match delta.target {
 		CrdtTarget::ThoughtAccessCount => {
 			for kern_id in g.all_ids() {
@@ -345,7 +340,7 @@ fn handle_entity_sync(d: &Deps, msg: GossipMessage) {
 	if payload.network_id.is_empty() {
 		return;
 	}
-	let mut g = d.graph.write().unwrap();
+	let mut g = write_recovered(&d.graph);
 	// Ignore our own data echoed back.
 	if payload.network_id == g.network_id {
 		return;
@@ -390,7 +385,7 @@ fn resolve_question_from_peer(d: &Deps, reason_id: &str, sphere: &SpherePayload,
 		return;
 	}
 
-	let (reason, kern_id) = match crate::base::search::find_reason(&d.graph.read().unwrap(), reason_id) {
+	let (reason, kern_id) = match crate::base::search::find_reason(&read_recovered(&d.graph), reason_id) {
 		Some(pair) => pair,
 		None => return,
 	};
@@ -398,9 +393,9 @@ fn resolve_question_from_peer(d: &Deps, reason_id: &str, sphere: &SpherePayload,
 		return;
 	}
 
-	let is_local = sphere.network_id == d.graph.read().unwrap().network_id;
+	let is_local = sphere.network_id == read_recovered(&d.graph).network_id;
 
-	let mut g = d.graph.write().unwrap();
+	let mut g = write_recovered(&d.graph);
 	if let Some(kern) = g.kerns.get_mut(&kern_id) {
 		if let Some(r) = kern.reasons.get_mut(reason_id) {
 			r.to = sphere.entity_id.clone();
@@ -422,47 +417,11 @@ fn resolve_question_from_peer(d: &Deps, reason_id: &str, sphere: &SpherePayload,
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::base::types::{
-		Acl, ChunkPart, ChunkPartKind, Entity, EntityKind, EntityStatus, Source,
-	};
-	use crate::crdt::GCounter;
+	use crate::base::types::{mk_entity as mk_entity_kind, Entity, EntityKind};
 
+	/// Local convenience: these gossip tests only ever need `Fact` entities.
 	fn mk_entity(id: &str, text: &str, heat: f64) -> Entity {
-		let mut e = Entity {
-			id: id.to_string(),
-			root_id: String::new(),
-			external_id: String::new(),
-			superseded_by: String::new(),
-			kind: EntityKind::Fact,
-			status: EntityStatus::Active,
-			statements: vec![text.to_string()],
-			chunks: vec![ChunkPart {
-				kind: ChunkPartKind::StatementRef,
-				text: String::new(),
-				index: 0,
-			}],
-			vector: vec![0.0; 8],
-			gnn_vector: Vec::new(),
-			score: 0.0,
-			conf_alpha: 2.0,
-			conf_beta: 1.0,
-			source: Source::Inline {
-				hash: id.into(),
-				section: String::new(),
-			},
-			created_at: None,
-			acl: Acl::default(),
-			access_count: GCounter::new(),
-			accessed_at: None,
-			heat: heat as f32,
-			heat_updated_at: None,
-			updated_at: None,
-			valid_until: None,
-			producer_id: String::new(),
-			unlinked_count: 0,
-		};
-		e.refresh_score();
-		e
+		mk_entity_kind(id, text, heat, EntityKind::Fact)
 	}
 
 	fn mk_deps(graph: Arc<RwLock<GraphGnn>>) -> Deps {

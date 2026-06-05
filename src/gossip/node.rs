@@ -7,6 +7,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
 use crate::base::constants::*;
+use crate::base::locks::{read_recovered, write_recovered};
 
 use super::ledger::Ledger;
 use super::seen::SeenSet;
@@ -48,27 +49,27 @@ impl Node {
 	}
 
 	pub fn set_handler(&self, h: Handler) {
-		*self.handler.write().unwrap() = Some(h);
+		*write_recovered(&self.handler) = Some(h);
 	}
 
 	pub fn set_fetch_handler(&self, h: FetchHandler) {
-		*self.fetch_handler.write().unwrap() = Some(h);
+		*write_recovered(&self.fetch_handler) = Some(h);
 	}
 
 	pub fn set_clipper(&self, c: Option<Arc<RateClipper>>) {
-		*self.clipper.write().unwrap() = c;
+		*write_recovered(&self.clipper) = c;
 	}
 
 	pub fn clipper(&self) -> Option<Arc<RateClipper>> {
-		self.clipper.read().unwrap().clone()
+		read_recovered(&self.clipper).clone()
 	}
 
 	pub fn addr(&self) -> String {
-		self.addr.read().unwrap().clone()
+		read_recovered(&self.addr).clone()
 	}
 
 	pub fn add_peer(&self, addr: &str) {
-		let mut peers = self.peers.write().unwrap();
+		let mut peers = write_recovered(&self.peers);
 		if peers.len() >= GOSSIP_MAX_PEERS {
 			return;
 		}
@@ -78,14 +79,14 @@ impl Node {
 	}
 
 	pub fn peer_list(&self) -> Vec<String> {
-		self.peers.read().unwrap().clone()
+		read_recovered(&self.peers).clone()
 	}
 
 	pub async fn listen(self: &Arc<Self>) -> Result<String, std::io::Error> {
 		let addr = self.addr();
 		let listener = TcpListener::bind(&addr).await?;
 		let actual = listener.local_addr()?.to_string();
-		*self.addr.write().unwrap() = actual.clone();
+		*write_recovered(&self.addr) = actual.clone();
 
 		let node = self.clone();
 		let mut stop = self.stop_rx.clone();
@@ -183,7 +184,7 @@ impl Node {
 		}
 
 		if !msg.origin.is_empty() {
-			if let Some(c) = self.clipper.read().unwrap().as_ref() {
+			if let Some(c) = read_recovered(&self.clipper).as_ref() {
 				if !c.admit(&msg.origin) {
 					return;
 				}
@@ -202,7 +203,7 @@ impl Node {
 			self.ledger.put_routing(&s.kern_id, &msg.origin);
 		}
 
-		if let Some(h) = self.handler.read().unwrap().as_ref() {
+		if let Some(h) = read_recovered(&self.handler).as_ref() {
 			h(msg.clone());
 		}
 
@@ -216,7 +217,7 @@ impl Node {
 			return;
 		};
 
-		let (body, found) = if let Some(fh) = self.fetch_handler.read().unwrap().as_ref() {
+		let (body, found) = if let Some(fh) = read_recovered(&self.fetch_handler).as_ref() {
 			fh(resource, id)
 		} else {
 			(Vec::new(), false)
@@ -297,8 +298,5 @@ async fn send_and_receive(addr: &str, msg: &GossipMessage) -> Option<GossipMessa
 }
 
 fn now_nanos() -> u64 {
-	std::time::SystemTime::now()
-		.duration_since(std::time::UNIX_EPOCH)
-		.unwrap_or_default()
-		.as_nanos() as u64
+	crate::base::util::now_nanos() as u64
 }

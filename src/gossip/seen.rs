@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::base::constants::{GOSSIP_SEEN_SET_CAP, GOSSIP_SEEN_TTL};
+use crate::base::locks::lock_recovered;
 
 /// Loop-suppression set for gossip message ids.
 ///
@@ -41,7 +42,7 @@ impl SeenSet {
 
 	/// Clock-injected core of [`add_and_check`], for deterministic tests.
 	fn add_and_check_at(&self, id: &str, now: Instant) -> bool {
-		let mut inner = self.inner.lock().unwrap();
+		let mut inner = lock_recovered(&self.inner);
 
 		// O(1) membership: already seen and not yet expired.
 		if let Some(&expires) = inner.live.get(id) {

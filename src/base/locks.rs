@@ -35,7 +35,7 @@
 //! snapshot. For the kern graph we accept best-effort recovery: a stale or
 //! mid-update `GraphGnn` is preferable to a dead daemon.
 
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Acquire a read guard, recovering from poison.
 ///
@@ -65,6 +65,23 @@ pub fn write_recovered<T: ?Sized>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 			tracing::warn!(
 				target: "kern::locks",
 				"RwLock poisoned on write; recovering inner guard (best-effort, state may be partially mutated)"
+			);
+			poisoned.into_inner()
+		}
+	}
+}
+
+/// Acquire a `Mutex` guard, recovering from poison.
+///
+/// On poison, the inner guard is extracted via `PoisonError::into_inner()` and
+/// a `warn!` is emitted via `tracing`. See module docs for safety reasoning.
+pub fn lock_recovered<T: ?Sized>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+	match lock.lock() {
+		Ok(g) => g,
+		Err(poisoned) => {
+			tracing::warn!(
+				target: "kern::locks",
+				"Mutex poisoned on lock; recovering inner guard (best-effort, state may be partially mutated)"
 			);
 			poisoned.into_inner()
 		}
