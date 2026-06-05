@@ -17,11 +17,18 @@ pub const DESCRIPTORS: [&str; 6] = [
 	"preference", "decision", "project", "fact", "code-fact", "reference",
 ];
 
-/// Extract durable claims from `conversation`. Returns `[]` when the
-/// conversation is empty or the LLM produces no parseable JSON array.
-pub fn distill(conversation: &str, llm: &dyn Fn(&str) -> String) -> Vec<Claim> {
+/// Extract durable claims from `conversation`.
+///
+/// Returns `Some([])` when the conversation is empty or the LLM responded but
+/// produced no parseable claims (a genuine "nothing worth keeping" reply, e.g.
+/// `"[]"` or prose). Returns `None` when the LLM call produced *no output at
+/// all* — the daemon's `complete_func` returns an empty string on any error,
+/// so an empty raw response signals a transient outage. The caller leaves such
+/// a delta in the spool to retry rather than archiving it, so an outage never
+/// loses captured knowledge.
+pub fn distill(conversation: &str, llm: &dyn Fn(&str) -> String) -> Option<Vec<Claim>> {
 	if conversation.trim().is_empty() {
-		return Vec::new();
+		return Some(Vec::new());
 	}
 	let prompt = format!(
 		"Extract durable, reusable knowledge from this conversation between a \
@@ -40,7 +47,12 @@ Skip greetings, acknowledgements, one-off task mechanics, and anything \
 ephemeral. If nothing is worth keeping, output []. Do not wrap the array in \
 markdown.\n\nCONVERSATION:\n{conversation}\n"
 	);
-	parse_claims(&llm(&prompt))
+	let raw = llm(&prompt);
+	if raw.trim().is_empty() {
+		// LLM call failed (no output) — signal retry, do not archive.
+		return None;
+	}
+	Some(parse_claims(&raw))
 }
 
 /// Parse claims from the first contiguous `[..]` span in `raw` (first `[`
@@ -104,7 +116,7 @@ mod tests {
 	#[test]
 	fn extracts_claims_and_maps_kind() {
 		let llm = stub(r#"[{"text":"User prefers tabs","kind":"preference"},{"text":"kern owns the graph","kind":"code-fact"}]"#);
-		let claims = distill("some conversation", &llm);
+		let claims = distill("some conversation", &llm).expect("some");
 		assert_eq!(claims.len(), 2);
 		assert_eq!(claims[0].text, "User prefers tabs");
 		assert_eq!(claims[0].descriptor, "preference");
@@ -114,26 +126,48 @@ mod tests {
 	#[test]
 	fn unknown_kind_falls_back_to_fact() {
 		let llm = stub(r#"[{"text":"x","kind":"banana"}]"#);
-		let claims = distill("c", &llm);
+		let claims = distill("c", &llm).expect("some");
 		assert_eq!(claims[0].descriptor, "fact");
 	}
 
 	#[test]
 	fn bad_json_yields_empty() {
 		let llm = stub("I could not find anything useful, sorry!");
-		assert!(distill("c", &llm).is_empty());
+		assert!(distill("c", &llm).expect("some").is_empty());
 	}
 
 	#[test]
 	fn empty_conversation_skips_llm() {
 		let llm = stub(r#"[{"text":"should not appear","kind":"fact"}]"#);
-		assert!(distill("   \n  ", &llm).is_empty());
+		assert!(distill("   \n  ", &llm).expect("some").is_empty());
+	}
+
+	#[test]
+	fn empty_llm_response_signals_retry() {
+		// An empty raw response means the LLM call failed; distill must return
+		// None so the caller leaves the delta in the spool for retry.
+		let llm = stub("");
+		assert!(distill("a real conversation worth keeping", &llm).is_none());
+	}
+
+	#[test]
+	fn whitespace_llm_response_signals_retry() {
+		let llm = stub("   \n\t ");
+		assert!(distill("a real conversation", &llm).is_none());
+	}
+
+	#[test]
+	fn genuine_empty_array_is_some_empty() {
+		// A successful "nothing worth keeping" reply ("[]") is NOT a failure:
+		// distill returns Some([]) so the delta is archived, not retried.
+		let llm = stub("[]");
+		assert_eq!(distill("a real conversation", &llm), Some(Vec::new()));
 	}
 
 	#[test]
 	fn tolerates_prose_around_json() {
 		let llm = stub("Here you go:\n[{\"text\":\"a\",\"kind\":\"fact\"}]\nHope that helps");
-		let claims = distill("c", &llm);
+		let claims = distill("c", &llm).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].text, "a");
 	}
@@ -141,7 +175,7 @@ mod tests {
 	#[test]
 	fn absent_kind_falls_back_to_fact() {
 		let llm = stub(r#"[{"text":"x"}]"#);
-		let claims = distill("c", &llm);
+		let claims = distill("c", &llm).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].descriptor, "fact");
 	}
@@ -149,7 +183,7 @@ mod tests {
 	#[test]
 	fn empty_or_missing_text_is_skipped() {
 		let llm = stub(r#"[{"text":"","kind":"fact"},{"kind":"fact"},{"text":"keep","kind":"fact"}]"#);
-		let claims = distill("c", &llm);
+		let claims = distill("c", &llm).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].text, "keep");
 	}
@@ -157,7 +191,7 @@ mod tests {
 	#[test]
 	fn single_nested_array_is_unwrapped() {
 		let llm = stub(r#"[[{"text":"a","kind":"fact"}]]"#);
-		let claims = distill("c", &llm);
+		let claims = distill("c", &llm).expect("some");
 		assert_eq!(claims.len(), 1);
 		assert_eq!(claims[0].text, "a");
 	}

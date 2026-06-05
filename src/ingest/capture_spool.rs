@@ -23,7 +23,8 @@ use crate::types::LlmFunc;
 
 /// Read + distill one delta file into `(stem, claims)`. The stem is the file
 /// name without extension (used as the session id for provenance). Returns
-/// `None` on read failure (the file is left in place for retry).
+/// `None` on read failure OR when distillation got no output from the LLM (a
+/// transient outage) — in both cases the file is left in place for retry.
 pub fn extract_claims(path: &Path, llm: &dyn Fn(&str) -> String) -> Option<(String, Vec<Claim>)> {
 	let text = match std::fs::read_to_string(path) {
 		Ok(t) => t,
@@ -37,7 +38,14 @@ pub fn extract_claims(path: &Path, llm: &dyn Fn(&str) -> String) -> Option<(Stri
 		.and_then(|s| s.to_str())
 		.unwrap_or("claude")
 		.to_string();
-	Some((stem, distill(&text, llm)))
+	let claims = match distill(&text, llm) {
+		Some(c) => c,
+		None => {
+			tracing::warn!(target: "kern.capture_spool", path = %path.display(), "distill got no LLM output; leaving delta in spool for retry");
+			return None;
+		}
+	};
+	Some((stem, claims))
 }
 
 /// Move a fully-ingested delta into `<done>/`. Best effort: on rename failure
@@ -146,6 +154,32 @@ mod tests {
 		let dir = tempdir().unwrap();
 		let missing = dir.path().join("nope.txt");
 		assert!(extract_claims(&missing, &stub_two).is_none());
+	}
+
+	#[test]
+	fn extract_returns_none_on_llm_outage() {
+		// LLM outage: complete_func returns "". A non-empty delta must NOT be
+		// archived as done — extract_claims returns None so run() leaves it in
+		// the spool for retry. Regression guard for the data-loss bug.
+		let dir = tempdir().unwrap();
+		let delta = dir.path().join("sess-outage.txt");
+		std::fs::write(&delta, "user: remember my API key lives in vault X").unwrap();
+		let down = |_q: &str| String::new();
+		assert!(extract_claims(&delta, &down).is_none());
+		assert!(delta.exists(), "delta must remain for retry after outage");
+	}
+
+	#[test]
+	fn extract_returns_some_on_genuine_no_claims() {
+		// LLM responded "[]" (nothing worth keeping) — this is success, so the
+		// delta should be archivable: extract_claims returns Some([]).
+		let dir = tempdir().unwrap();
+		let delta = dir.path().join("sess-empty.txt");
+		std::fs::write(&delta, "user: hi\nassistant: hello").unwrap();
+		let nothing = |_q: &str| "[]".to_string();
+		let (stem, claims) = extract_claims(&delta, &nothing).expect("some");
+		assert_eq!(stem, "sess-empty");
+		assert!(claims.is_empty());
 	}
 
 	#[test]
