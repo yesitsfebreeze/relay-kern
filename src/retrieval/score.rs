@@ -30,7 +30,7 @@ pub struct QueryOptions {
 	pub sort: SortField,
 	pub ascending: bool,
 	/// Legacy free-form source-system filter. Compared against
-	/// [`Source::system()`].
+	/// `Source::system()`.
 	pub source: String,
 	/// Typed entity-kind filter; `None` disables the filter.
 	pub kind: Option<EntityKind>,

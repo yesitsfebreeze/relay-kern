@@ -1,8 +1,11 @@
 //! Detached cold storage for evicted thoughts.
 //!
 //! Stigmergy GC spills cold, abandoned, non-durable entities here before
-//! dropping them from the hot graph, so compaction never loses data. The
-//! store is an append-only JSONL file under `<data_dir>/cold/`; the latest
+//! dropping them from the hot graph, so eviction does not lose data
+//! immediately. The cold tier is bounded: `compact` keeps the newest
+//! `COLD_MAX_ENTRIES` and drops the oldest, so data is retained until that cap
+//! is exceeded. The store is an append-only JSONL file under `<data_dir>/cold/`;
+//! the latest
 //! line for an id wins on read (so a re-spilled, merged entity supersedes
 //! an older copy). Retrieval rehydrates by id on demand (lazy-link).
 
@@ -41,7 +44,7 @@ pub fn spill(cold_dir: &Path, entity: &Entity) {
 }
 
 /// Compact the cold store only if it has grown past
-/// [`COLD_COMPACT_MIN_BYTES`]. Compaction rewrites the whole file (O(total)),
+/// `COLD_COMPACT_MIN_BYTES`. Compaction rewrites the whole file (O(total)),
 /// so this gate keeps steady-state GC from rewriting the entire store every
 /// sweep when only a few victims were spilled; because compaction shrinks the
 /// file, it self-rate-limits. Reads remain correct meanwhile (latest-line-wins

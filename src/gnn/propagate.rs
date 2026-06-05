@@ -14,7 +14,7 @@ use crate::gnn::tensor::Tensor;
 use crate::gnn::train::TrainConfig;
 
 /// Single source of truth for GnnConfig field defaults, shared by the runtime
-/// [`GnnConfig::defaults`] and the serde [`crate::config::gnn::GnnConfig`]
+/// [`GnnConfig::defaults`] and the serde `crate::config::GnnConfig`
 /// default so the two layers cannot drift.
 pub const DEFAULT_SELF_WEIGHT: f64 = 0.6;
 pub const DEFAULT_MIN_WEIGHT: f64 = 0.01;

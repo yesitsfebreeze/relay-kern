@@ -73,7 +73,9 @@ pub fn run_gc(
 	for id in &victims {
 		if let Some(dir) = cold_dir {
 			// Spill the victim to the detached cold tier before the hot drop,
-			// so self-compaction never permanently loses data. Clone it out
+			// so eviction does not lose data immediately (the cold tier is
+				// bounded — oldest entries past COLD_MAX_ENTRIES are dropped).
+				// Clone it out
 			// of the kern while we still hold the single write guard.
 			let victim = g.kerns.get(kern_id).and_then(|k| k.entities.get(id)).cloned();
 			if let Some(e) = victim {
