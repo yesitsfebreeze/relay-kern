@@ -4,9 +4,9 @@
 
 **Goal:** Make the per-cwd `kern` daemon the single memory substrate for both Claude Code and the native `agnt` loop — it auto-learns durable facts from sessions and serves them back into context — and retire the Claude Code file-memory, Vicky, and context-mode stores.
 
-**Architecture:** All memory traffic is **file-mediated through the running daemon** to avoid the CLI-vs-daemon graph race. Capture: a Claude Code `Stop` hook writes a plain-text conversation delta into `.relay/capture/`; a new daemon task (`capture_spool`) distills it into durable claims with an LLM (`distill.rs`) and ingests them through the canonical `Worker`. Recall: a new daemon task keeps `.relay/kern/digest.md` fresh; a `SessionStart` hook `cat`s it into context. The live `query` MCP tool (already shipped) handles mid-session deep recall.
+**Architecture:** All memory traffic is **file-mediated through the running daemon** to avoid the CLI-vs-daemon graph race. Capture: a Claude Code `Stop` hook writes a plain-text conversation delta into `.kern/capture/`; a new daemon task (`capture_spool`) distills it into durable claims with an LLM (`distill.rs`) and ingests them through the canonical `Worker`. Recall: a new daemon task keeps `.kern/digest.md` fresh; a `SessionStart` hook `cat`s it into context. The live `query` MCP tool (already shipped) handles mid-session deep recall.
 
-**Tech Stack:** Rust (kern daemon — tokio, serde, clap), Node ESM (`.mjs` Claude Code hooks), TOML config (`.relay/kern.toml`), JSON settings (`~/.claude/settings.json`).
+**Tech Stack:** Rust (kern daemon — tokio, serde, clap), Node ESM (`.mjs` Claude Code hooks), TOML config (`.kern/kern.toml`), JSON settings (`~/.claude/settings.json`).
 
 **Spec:** `docs/superpowers/specs/2026-06-04-kern-unified-memory-design.md`
 
@@ -23,7 +23,7 @@ You do not need deep knowledge of kern. The facts you need:
   - `Source` — use `Source::Session { session_id, section, title }` for captured claims (provenance + feedback-loop filtering).
   - `crate::types::LlmFunc` = `Arc<dyn Fn(&str) -> String + Send + Sync>`.
   - `crate::ingest::Config { dedup_threshold, ttl_secs, hnsw_k, hnsw_ef, rephrase_lower, rephrase_upper }` (`src/ingest/config.rs`) — build with `Config { dedup_threshold: cfg.ingest.dedup_threshold, ..Default::default() }`.
-- **Config** (`src/config/mod.rs`): `Config::load(cwd)` merges `<XDG>/relay/kern.toml` then `<cwd>/.relay/kern.toml`. Add new sections by creating a module under `src/config/` and adding a field to `Config` (follow `src/config/watcher.rs` exactly).
+- **Config** (`src/config/mod.rs`): `Config::load(cwd)` merges `<XDG>/kern/kern.toml` then `<cwd>/.kern/kern.toml`. Add new sections by creating a module under `src/config/` and adding a field to `Config` (follow `src/config/watcher.rs` exactly).
 - **Daemon wiring** lives in `run_server` in `src/commands.rs` (the `session_mirror` block at lines ~440–472 and the `file_watcher` block at ~474–492 are your templates for spawning a background task).
 - **Build/test:** `cargo build` and `cargo test` from the repo root (`C:\Users\sayhe\dev\relay\kern`). Run a single test with `cargo test <name> -- --nocapture`.
 - **No compat shims, version stays 1.0.0** (repo rule in `CLAUDE.md`).
@@ -48,7 +48,7 @@ You do not need deep knowledge of kern. The facts you need:
 - `C:\Users\sayhe\.claude\hooks\kern-capture.mjs` — Stop hook: transcript delta → spool file.
 - `C:\Users\sayhe\.claude\hooks\kern-recall.mjs` — SessionStart hook: cat digest.
 - `C:\Users\sayhe\.claude\hooks\__tests__\kern-capture.test.mjs` — Node test for the extractor.
-- `C:\Users\sayhe\dev\relay\kern\.relay\kern.toml` — project config: `[reason]`, `[capture]`.
+- `C:\Users\sayhe\dev\relay\kern\.kernkern.toml` — project config: `[reason]`, `[capture]`.
 
 **Modify (Claude Code glue):**
 - `C:\Users\sayhe\.claude\settings.json` — register hooks; disable `vicky`, `context-mode`.
@@ -77,9 +77,9 @@ mod tests {
     fn defaults_are_off_with_sane_tunables() {
         let c = CaptureConfig::default();
         assert!(!c.enabled);
-        assert_eq!(c.dir, ".relay/capture");
+        assert_eq!(c.dir, ".kern/capture");
         assert_eq!(c.poll_secs, 5);
-        assert_eq!(c.digest_path, ".relay/kern/digest.md");
+        assert_eq!(c.digest_path, ".kern/digest.md");
         assert_eq!(c.digest_secs, 30);
         assert_eq!(c.digest_k, 40);
     }
@@ -100,7 +100,7 @@ use serde::{Deserialize, Serialize};
 
 /// Configuration for Claude-Code memory capture + recall.
 ///
-/// OFF by default. Opt in via a `[capture]` section in `.relay/kern.toml`:
+/// OFF by default. Opt in via a `[capture]` section in `.kern/kern.toml`:
 ///
 /// ```toml
 /// [capture]
@@ -127,9 +127,9 @@ impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            dir: ".relay/capture".into(),
+            dir: ".kern/capture".into(),
             poll_secs: 5,
-            digest_path: ".relay/kern/digest.md".into(),
+            digest_path: ".kern/digest.md".into(),
             digest_secs: 30,
             digest_k: 40,
         }
@@ -709,7 +709,7 @@ Insert after the `if cfg.watcher.enabled { … }` block (around line 492 in `src
 ```rust
     // Claude-Code memory: capture spool drain + recall digest writer.
     // Both file-mediated; off unless `[capture] enabled = true` in
-    // `.relay/kern.toml`.
+    // `.kern/kern.toml`.
     if cfg.capture.enabled {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
@@ -781,7 +781,7 @@ git commit -m "feat(daemon): spawn capture_spool + digest writer when enabled"
 - Create: `C:\Users\sayhe\.claude\hooks\kern-capture.mjs`
 - Create: `C:\Users\sayhe\.claude\hooks\__tests__\kern-capture.test.mjs`
 
-The hook reads the Stop event JSON from stdin (`{ transcript_path, session_id, cwd, ... }`), extracts the conversation delta since the last run, and writes it to `<cwd>/.relay/capture/<session>-<n>.txt`. All graph work happens later in the daemon. **Fail-open: any error → exit 0 with no output.**
+The hook reads the Stop event JSON from stdin (`{ transcript_path, session_id, cwd, ... }`), extracts the conversation delta since the last run, and writes it to `<cwd>/.kern/capture/<session>-<n>.txt`. All graph work happens later in the daemon. **Fail-open: any error → exit 0 with no output.**
 
 - [ ] **Step 1: Write the failing test**
 
@@ -981,13 +981,13 @@ Expected: with no `digest.md`, prints nothing (exit 0). After the daemon has wri
 ### Task B3: project config — enable capture + point reason LLM
 
 **Files:**
-- Create: `C:\Users\sayhe\dev\relay\kern\.relay\kern.toml`
+- Create: `C:\Users\sayhe\dev\relay\kern\.kernkern.toml`
 
 The daemon needs a `reason` LLM for distillation and `capture.enabled = true`. The `reason.url` should be a cheap/local model endpoint (distillation runs once per captured delta).
 
 - [ ] **Step 1: Write the config**
 
-Create `.relay/kern.toml`:
+Create `.kern/kern.toml`:
 
 ```toml
 # Project-scope kern config. Merges over the user-scope kern.toml.
@@ -996,14 +996,14 @@ Create `.relay/kern.toml`:
 # Cheap model for distillation + smart-split. Point at your local Ollama
 # (or any OpenAI-compatible endpoint). Falls back to [embed].url if unset.
 url = "http://localhost:11434"
-model = "llama3"
+model = "qwen2.5"
 
 [capture]
 enabled = true
 # dir, poll_secs, digest_path, digest_secs, digest_k use CaptureConfig defaults.
 ```
 
-> Confirm the embed endpoint already works (`embed.url` defaults to `http://localhost:11434`, `nomic-embed-text`). If your reason model differs, set `model` accordingly. Add `key` under `[reason]` only if the endpoint needs auth.
+> Confirm the embed endpoint already works (`embed.url` defaults to `http://localhost:11434`, `bge-m3`). If your reason model differs, set `model` accordingly. Add `key` under `[reason]` only if the endpoint needs auth.
 
 - [ ] **Step 2: Verify the daemon loads it**
 
@@ -1015,7 +1015,7 @@ Expected: no config error; capture spawn block runs (add a temporary `tracing::i
 - [ ] **Step 3: Commit**
 
 ```bash
-git add .relay/kern.toml
+git add .kern/kern.toml
 git commit -m "chore(config): enable claude-code capture in kern.toml"
 ```
 
@@ -1117,7 +1117,7 @@ Call `mcp__kern__descriptor` (action `add`) once per descriptor:
 
 - [ ] **Step 1: Ensure daemon running with capture enabled**
 
-`cargo run -p kern -- -d` (with `.relay/kern.toml` from B3). Confirm `mcp__kern__health` responds.
+`cargo run -p kern -- -d` (with `.kern/kern.toml` from B3). Confirm `mcp__kern__health` responds.
 
 - [ ] **Step 2: Drop a delta stating a durable fact**
 
@@ -1145,7 +1145,7 @@ Expected: contains the purpose and the tabs/spaces preference.
 
 - [ ] **Step 5: Verify idempotency**
 
-Re-drop the same content as `e2e-2.txt`. After drain, `mcp__kern__health` entity count should NOT increase (dedup at `dedup_threshold = 0.95`). If it does, lower `dedup_threshold` in `.relay/kern.toml` and document the chosen value.
+Re-drop the same content as `e2e-2.txt`. After drain, `mcp__kern__health` entity count should NOT increase (dedup at `dedup_threshold = 0.95`). If it does, lower `dedup_threshold` in `.kern/kern.toml` and document the chosen value.
 
 ---
 

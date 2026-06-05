@@ -1,8 +1,8 @@
-# Relay
+# kern
 
 This book has two layers:
 
-- **Guides** — how to use Relay's parts together. Each guide walks a
+- **Guides** — how to use kern's parts together. Each guide walks a
   flow across crates.
 - **Crates** — per-crate READMEs. Reference material for each unit.
 - **API** — rustdoc for everything. Linked from guides via symbol

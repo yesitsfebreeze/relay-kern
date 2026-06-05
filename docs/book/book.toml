@@ -1,14 +1,14 @@
 [book]
 title = "Kern"
-authors = ["Relay contributors"]
+authors = ["kern contributors"]
 language = "en"
 src = "src"
 
 [output.html]
 default-theme = "ayu"
 preferred-dark-theme = "ayu"
-git-repository-url = "https://github.com/yesitsfebreeze/relay"
-edit-url-template = "https://github.com/yesitsfebreeze/relay/edit/relay/docs/book/{path}"
+git-repository-url = "https://github.com/yesitsfebreeze/relay-kern"
+edit-url-template = "https://github.com/yesitsfebreeze/relay-kern/edit/master/docs/book/{path}"
 additional-css = ["theme/custom.css"]
 additional-js = ["theme/custom.js"]
 no-section-label = false

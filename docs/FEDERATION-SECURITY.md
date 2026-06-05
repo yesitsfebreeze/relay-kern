@@ -2,9 +2,7 @@
 
 > **Scope.** This document describes the trust model of the gossip federation
 > **as implemented today**, for an operator deciding whether and how to enable
-> it. It is deliberately separate from [`SECURITY.md`](SECURITY.md), which is an
-> aspirational governance *design target* ("nothing in this document is
-> implemented yet"). This file describes the code that actually runs.
+> it. This file describes the code that actually runs.
 
 ## TL;DR
 
@@ -87,5 +85,5 @@ With `enabled = true`, a node:
 
 ## Reporting
 
-Security issues in the federation path: see [`SECURITY.md`](SECURITY.md) for the
-broader model and disclosure expectations.
+Report security issues in the federation path privately to the maintainers
+before public disclosure.

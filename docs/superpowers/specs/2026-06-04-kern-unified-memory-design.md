@@ -88,13 +88,13 @@ write paths in, two read paths out.
   offset, extracts the conversation delta — user prompt strings + assistant
   `text` blocks only (drop `thinking`, `tool_use`, `tool_result`, `system`,
   attachments) — and writes it as a plain-text delta file into a watched spool
-  dir, `<cwd>/.relay/capture/`. The hook does **no** LLM work and **no** graph
+  dir, `<cwd>/.kern/capture/`. The hook does **no** LLM work and **no** graph
   access; it is a deterministic transcript-to-text extractor.
-- New daemon task **`ingest/capture_spool.rs`**. Polls `.relay/capture/`, and
+- New daemon task **`ingest/capture_spool.rs`**. Polls `.kern/capture/`, and
   for each new delta file: calls `ingest/distill.rs` (LLM extraction via the
   kern `reason` client) to turn the conversation into durable claims, enqueues
   each claim through the canonical `Worker`, then archives the consumed file to
-  `.relay/capture/done/`. Archiving = natural idempotency (no re-read of a
+  `.kern/capture/done/`. Archiving = natural idempotency (no re-read of a
   rewritten file). Single graph owner = the daemon, so no race.
 - **`ingest/distill.rs`.** `distill(conversation, &LlmFunc) -> Vec<Claim>`
   where `Claim { text: String, kind: ClaimKind }`. The prompt asks for durable,
@@ -109,7 +109,7 @@ write paths in, two read paths out.
   naturally outside the captured delta. Mirrors the existing `session_mirror`
   "drop kern-produced entries" fix (commit `7cffc24`).
 - **Offset tracking.** The hook persists the last-processed line count per
-  transcript in `.relay/capture/.offsets.json` so each run captures only the
+  transcript in `.kern/capture/.offsets.json` so each run captures only the
   new delta and is idempotent across runs.
 
 ### 3. Capture — agnt side (native)
@@ -123,11 +123,11 @@ write paths in, two read paths out.
 ### 4. Recall — Claude Code side
 
 - New daemon task **digest writer**. On a timer (and after ingest), regenerates
-  `<cwd>/.relay/kern/digest.md` = the root purpose plus the top-K hottest /
+  `<cwd>/.kern/digest.md` = the root purpose plus the top-K hottest /
   most-recent thoughts. Because the kern is per-cwd, this digest is already
   project-scoped. Writing a file (not answering a live query) keeps recall
   decoupled from the hook and trivially fail-open.
-- **SessionStart hook** (`recall-kern-digest`). `cat`s `.relay/kern/digest.md`
+- **SessionStart hook** (`recall-kern-digest`). `cat`s `.kern/digest.md`
   and emits it as additional context (same injection mechanism context-mode /
   caveman already use). Replaces the `MEMORY.md` injection. Missing file →
   empty output, session proceeds normally.
@@ -156,11 +156,11 @@ write paths in, two read paths out.
 ## Data flow
 
 - **Write.** Turn ends → Stop hook extracts conversation delta → writes
-  `.relay/capture/<session>-<n>.txt` → `capture_spool` task picks it up →
+  `.kern/capture/<session>-<n>.txt` → `capture_spool` task picks it up →
   `distill` (LLM) → claims → `Worker` (chunk → embed → place + propose reason
   edges) → archive the delta file. Tick decays heat; condensation parks cold
   clusters; `find_rephrase_candidates` merges near-duplicates over time.
-- **Read.** Daemon digest writer keeps `.relay/kern/digest.md` fresh → session
+- **Read.** Daemon digest writer keeps `.kern/digest.md` fresh → session
   starts → SessionStart hook cats it → injected as context. Mid-session → model
   calls the `query` MCP tool.
 

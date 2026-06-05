@@ -284,5 +284,5 @@ Thought-level PageRank (phase 2) feeds `base::split`:
 - Xiao, Tian et al. — *Efficient Streaming Subgraph Isomorphism* (comparable incremental-update framing).
 - Xiao et al. — *Efficient Streaming Algorithms for Graphlet Counting* (for
   incremental graph stat precedent).
-- Relay source: `crates/gossip/src/handler.rs`, `crates/retrieval/src/score.rs`,
+- Source: `crates/gossip/src/handler.rs`, `crates/retrieval/src/score.rs`,
   `crates/retrieval/src/fuse.rs`, `crates/gossip/src/types.rs`.
