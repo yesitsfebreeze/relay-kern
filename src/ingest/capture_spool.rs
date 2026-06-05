@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::base::types::{EntityKind, Source};
 use crate::ingest::distill::{distill, Claim};
@@ -71,15 +71,48 @@ pub fn finalize(path: &Path, done_dir: &Path, results: &[bool]) -> bool {
 	}
 }
 
+/// Delete archived deltas under `done_dir` whose mtime is older than `max_age`.
+/// The graph is the durable copy after ingest, so the archive is only a
+/// transient audit trail; sweeping it each drain cycle bounds disk/inode
+/// growth on a daemon that runs indefinitely. `now` is injected for testing.
+/// Returns the number of files removed.
+pub fn prune_done(done_dir: &Path, max_age: Duration, now: SystemTime) -> usize {
+	let entries = match std::fs::read_dir(done_dir) {
+		Ok(e) => e,
+		Err(_) => return 0, // archive dir may not exist yet
+	};
+	let mut removed = 0;
+	for ent in entries.flatten() {
+		let path = ent.path();
+		if !path.is_file() {
+			continue;
+		}
+		let modified = match ent.metadata().and_then(|m| m.modified()) {
+			Ok(m) => m,
+			Err(_) => continue,
+		};
+		let too_old = now
+			.duration_since(modified)
+			.map(|age| age > max_age)
+			.unwrap_or(false);
+		if too_old && std::fs::remove_file(&path).is_ok() {
+			removed += 1;
+		}
+	}
+	removed
+}
+
 /// Daemon loop. Polls `spool_dir` every `interval`. For each `*.txt` delta:
 /// distill, ingest each claim through `worker` (awaiting the outcome), and
-/// archive the file only if all claims committed.
+/// archive the file only if all claims committed. Each cycle also prunes
+/// archived deltas older than `done_retention` so `done/` stays bounded.
 pub async fn run(
 	spool_dir: PathBuf,
 	worker: Arc<Worker>,
 	llm: LlmFunc,
 	dedup_threshold: f64,
 	interval: Duration,
+	done_retention: Duration,
 ) {
 	let _ = std::fs::create_dir_all(&spool_dir);
 	let done = spool_dir.join("done");
@@ -126,13 +159,46 @@ pub async fn run(
 			}
 			finalize(&path, &done, &results);
 		}
+		prune_done(&done, done_retention, SystemTime::now());
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::time::{Duration, SystemTime};
 	use tempfile::tempdir;
+
+	#[test]
+	fn prune_done_removes_entries_older_than_retention() {
+		let dir = tempdir().unwrap();
+		let done = dir.path().to_path_buf();
+		let f = done.join("old.txt");
+		std::fs::write(&f, "x").unwrap();
+		// Treat "now" as an hour past the file's mtime, retention 60s -> pruned.
+		let future = SystemTime::now() + Duration::from_secs(3600);
+		let removed = prune_done(&done, Duration::from_secs(60), future);
+		assert_eq!(removed, 1);
+		assert!(!f.exists());
+	}
+
+	#[test]
+	fn prune_done_keeps_recent_entries() {
+		let dir = tempdir().unwrap();
+		let done = dir.path().to_path_buf();
+		let f = done.join("fresh.txt");
+		std::fs::write(&f, "x").unwrap();
+		let removed = prune_done(&done, Duration::from_secs(3600), SystemTime::now());
+		assert_eq!(removed, 0);
+		assert!(f.exists());
+	}
+
+	#[test]
+	fn prune_done_missing_dir_is_noop() {
+		let dir = tempdir().unwrap();
+		let missing = dir.path().join("nope");
+		assert_eq!(prune_done(&missing, Duration::from_secs(1), SystemTime::now()), 0);
+	}
 
 	fn stub_two(_q: &str) -> String {
 		r#"[{"text":"fact one","kind":"fact"},{"text":"a preference","kind":"preference"}]"#

@@ -29,6 +29,11 @@ pub struct CaptureConfig {
 	pub digest_secs: u64,
 	/// Max thoughts included in the digest.
 	pub digest_k: usize,
+	/// Retention window, in seconds, for archived deltas under `<dir>/done/`.
+	/// The graph is the durable copy after ingest; the archive is only a
+	/// transient audit trail, so it is swept each drain cycle and entries older
+	/// than this are deleted to bound disk/inode growth. Default 7 days.
+	pub done_retention_secs: u64,
 }
 
 impl Default for CaptureConfig {
@@ -40,6 +45,7 @@ impl Default for CaptureConfig {
 			digest_path: ".relay/kern/digest.md".into(),
 			digest_secs: 30,
 			digest_k: 40,
+			done_retention_secs: 7 * 24 * 60 * 60,
 		}
 	}
 }
@@ -57,5 +63,6 @@ mod tests {
 		assert_eq!(c.digest_path, ".relay/kern/digest.md");
 		assert_eq!(c.digest_secs, 30);
 		assert_eq!(c.digest_k, 40);
+		assert_eq!(c.done_retention_secs, 7 * 24 * 60 * 60);
 	}
 }

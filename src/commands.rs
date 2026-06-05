@@ -517,8 +517,10 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 			let worker_c = worker.clone();
 			let dedup = cfg.ingest.dedup_threshold;
 			let poll = std::time::Duration::from_secs(cfg.capture.poll_secs);
+			let done_retention =
+				std::time::Duration::from_secs(cfg.capture.done_retention_secs);
 			tokio::spawn(crate::ingest::capture_spool::run(
-				spool, worker_c, llm_fn, dedup, poll,
+				spool, worker_c, llm_fn, dedup, poll, done_retention,
 			));
 		} else {
 			tracing::warn!(
