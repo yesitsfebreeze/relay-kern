@@ -43,12 +43,18 @@ fn bincode_cfg() -> impl bincode::config::Config {
 	bincode::config::standard().with_limit::<{ 1024 * 1024 * 1024 }>()
 }
 
+/// Append a literal suffix to a path (whole filename, not the extension).
+/// Stays in the same directory so a subsequent `rename` is atomic.
+fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+	let mut p = path.as_os_str().to_owned();
+	p.push(suffix);
+	PathBuf::from(p)
+}
+
 /// Tmp-file convention: append `.tmp` to the final path. Same directory
 /// (same volume) so `rename` is atomic on both Windows and Unix.
 fn tmp_path(path: &Path) -> PathBuf {
-	let mut p = path.as_os_str().to_owned();
-	p.push(".tmp");
-	PathBuf::from(p)
+	append_suffix(path, ".tmp")
 }
 
 /// Crash-atomic write: write `data` to `{path}.tmp`, fsync, then rename.
@@ -106,9 +112,7 @@ struct QuantMeta {
 }
 
 fn quant_sidecar_path(path: &Path) -> PathBuf {
-	let mut p = path.as_os_str().to_owned();
-	p.push(".quant");
-	PathBuf::from(p)
+	append_suffix(path, ".quant")
 }
 
 fn quant_dir_sidecar(dir: &str) -> PathBuf {
@@ -221,6 +225,7 @@ pub fn load_dir(dir: &str) -> Result<GraphGnn, PersistError> {
 	kerns.insert(root_id.clone(), root);
 
 	let unloaded = std::collections::HashSet::new();
+	let mut skipped = 0usize;
 	for entry in fs::read_dir(dir)? {
 		let entry = entry?;
 		let name = entry.file_name().to_string_lossy().to_string();
@@ -231,10 +236,22 @@ pub fn load_dir(dir: &str) -> Result<GraphGnn, PersistError> {
 		if id == root_id || id == "_meta" {
 			continue;
 		}
-		if let Ok(mut k) = load_kern(dir, id) {
-			migrate_root_id(&mut k, &network_id);
-			kerns.insert(k.id.clone(), k);
+		match load_kern(dir, id) {
+			Ok(mut k) => {
+				migrate_root_id(&mut k, &network_id);
+				kerns.insert(k.id.clone(), k);
+			}
+			// A corrupt/unreadable sibling must not vanish silently: warn so the
+			// orphaned data is visible rather than producing a quietly truncated
+			// graph. The root is loaded above and still hard-errors.
+			Err(e) => {
+				skipped += 1;
+				tracing::warn!(target: "kern.persist", kern = %id, error = %e, "skipping corrupt/unreadable kern file");
+			}
 		}
+	}
+	if skipped > 0 {
+		tracing::warn!(target: "kern.persist", skipped, dir = %dir, "load_dir skipped corrupt kern file(s)");
 	}
 
 	let root_kern = kerns
@@ -378,5 +395,22 @@ mod tests {
 		let reloaded = load_kern(&g.data_dir, &g.root.id).unwrap();
 		assert_eq!(reloaded.purpose_text, "P");
 		assert_eq!(reloaded.descriptors.get("k").map(String::as_str), Some("v"));
+	}
+
+	#[test]
+	fn load_dir_skips_corrupt_kern_files() {
+		let dir = tempdir().unwrap();
+		let d = dir.path().to_string_lossy().to_string();
+		save_kern(&d, &Kern::new("root", "")).unwrap();
+		save_kern(&d, &Kern::new("child1", "root")).unwrap();
+		// A corrupt sibling that fails to decode.
+		fs::write(format!("{d}/bad.kern"), b"not a valid bincode kern").unwrap();
+
+		let g = load_dir(&d).expect("load_dir tolerates a corrupt sibling");
+		assert!(g.loaded("child1").is_some(), "valid sibling still loads");
+		assert!(
+			g.map().keys().all(|k| k != "bad"),
+			"corrupt kern is skipped, not inserted"
+		);
 	}
 }
