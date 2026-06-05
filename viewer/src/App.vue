@@ -42,8 +42,15 @@ function findPath(node, id, acc = []) { acc.push(node); if (node.id === id) retu
 function findById(n, id) { if (n.id === id) return n; for (const c of n.children || []) { const r = findById(c, id); if (r) return r } return null }
 
 const heatMax = () => Math.max(0.5, d3.max(raw.nodes, n => +n.heat || 0) || 1)
-function ramp(h) { return d3.interpolateInferno(0.22 + 0.7 * Math.sqrt(Math.min(1, (h || 0) / heatMax()))) }
+// refined warm ramp (ember → amber → cream); no muddy purple/black.
+const WARM = d3.interpolateRgbBasis(['#2a1809', '#7c3c17', '#cf6f25', '#f2a93e', '#ffe2a6'])
+function ramp(h) { return WARM(0.12 + 0.85 * Math.sqrt(Math.min(1, (h || 0) / heatMax()))) }
 function fill(ref) { return ramp(ref.type === 'entity' ? ref.heat : meanHeat[ref.id]) }
+function textColor(ref) {
+  const c = d3.color(fill(ref)); if (!c) return '#fff'
+  const lum = (0.299 * c.r + 0.587 * c.g + 0.114 * c.b) / 255
+  return lum > 0.62 ? '#1c1206' : '#fdfaf3'
+}
 function meta(ref) { return ref.type === 'kern' ? `${d3Count(ref)} thoughts${subSpheres(ref) ? ` · ${subSpheres(ref)} spheres` : ''}` : ref.kind }
 function info(ref) { return ref.type === 'entity' ? `${ref.kind} · heat ${(+ref.heat).toFixed(2)} · conf ${(+ref.conf).toFixed(2)} — ${ref.label}` : `${ref.label} · ${d3Count(ref)} thoughts — click to enter` }
 
@@ -61,14 +68,16 @@ function relayout() {
     return
   }
 
-  // Otherwise → squarified cube of sub-topics (+ any loose thoughts), centered.
+  // Otherwise → squarified cube of sub-topics (+ any loose thoughts), centered
+  // with generous whitespace around it (it's a framed piece, not edge-to-edge).
   mode.value = 'cube'
-  const s = Math.max(160, Math.min(stageEl.value.clientWidth, stageEl.value.clientHeight) - 24)
-  side.value = s
+  // a real square, sized off the smaller viewport dim, capped, with margin.
+  const s = Math.round(Math.max(280, Math.min(stageEl.value.clientWidth, stageEl.value.clientHeight, 760) * 0.62, 0))
+  side.value = Math.min(s, 620)
   const data = kids.map(c => ({ ref: c, value: d3Count(c) }))
   const r = d3.hierarchy({ children: data }).sum(d => d.value || 0).sort((a, b) => (b.value || 0) - (a.value || 0))
-  d3.treemap().tile(d3.treemapSquarify.ratio(1)).size([s, s]).round(true).paddingInner(6)(r)
-  tiles.value = (r.children || []).map(n => ({ ref: n.data.ref, x: n.x0, y: n.y0, w: n.x1 - n.x0, h: n.y1 - n.y0, n: n.value }))
+  d3.treemap().tile(d3.treemapSquarify.ratio(1)).size([s, s]).round(true).paddingInner(8)(r)
+  tiles.value = (r.children || []).map((n, i) => ({ ref: n.data.ref, x: n.x0, y: n.y0, w: n.x1 - n.x0, h: n.y1 - n.y0, n: n.value, i }))
   stats.value = `${raw.nodes.length} thoughts · ${raw.kerns.length} spheres · here: ${r.value}`
 }
 
@@ -119,7 +128,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListe
   <div ref="stageEl" class="stage">
     <div v-if="mode === 'cube'" class="cube" :style="{ width: side + 'px', height: side + 'px' }">
       <div v-for="t in tiles" :key="t.ref.id" class="tile" :class="t.ref.type"
-        :style="{ left: t.x + 'px', top: t.y + 'px', width: t.w + 'px', height: t.h + 'px', background: fill(t.ref) }"
+        :style="{ left: t.x + 'px', top: t.y + 'px', width: t.w + 'px', height: t.h + 'px', background: fill(t.ref), color: textColor(t.ref), '--i': t.i }"
         @click="enter(t.ref)" @mouseenter="detail = info(t.ref)" @mouseleave="detail = ''">
         <div class="tname">{{ t.ref.label }}</div>
         <div class="tmeta">{{ meta(t.ref) }}</div>
@@ -141,41 +150,67 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListe
 </template>
 
 <style>
+:root {
+  --bg: #0a0a0c;
+  --ink: #f4f1ea;
+  --muted: #8b8678;
+  --line: rgba(244,241,234,0.10);
+  --display: 'Bricolage Grotesque', system-ui, sans-serif;
+  --body: 'Hanken Grotesk', system-ui, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, monospace;
+}
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; margin: 0; }
-.stage { position: fixed; inset: 0; background: #07090d; display: flex; align-items: center; justify-content: center; }
+
+.stage {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  padding: 96px 64px 84px;
+  background:
+    radial-gradient(120% 90% at 50% -10%, #16130f 0%, #0a0a0c 55%, #08080a 100%);
+}
 
 .cube { position: relative; }
-.tile { position: absolute; border-radius: 8px; overflow: hidden; padding: 8px;
+.tile {
+  position: absolute; border-radius: 14px; overflow: hidden; padding: 12px;
   display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
-  border: 1px solid rgba(255,255,255,0.08); cursor: pointer; transition: filter .1s, transform .1s; }
-.tile.kern:hover { filter: brightness(1.18); transform: scale(1.01); border-color: #fff; z-index: 2; }
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.07), 0 8px 24px -12px rgba(0,0,0,0.7);
+  cursor: pointer; transition: transform .18s cubic-bezier(.2,.7,.2,1), filter .18s, box-shadow .18s;
+  animation: pop .42s both cubic-bezier(.2,.8,.2,1); animation-delay: calc(var(--i) * 22ms);
+}
+@keyframes pop { from { opacity: 0; transform: scale(.92); } to { opacity: 1; transform: scale(1); } }
+.tile.kern:hover { transform: translateY(-3px) scale(1.015); filter: brightness(1.12);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.5), 0 16px 36px -14px rgba(0,0,0,0.8); z-index: 3; }
 .tile.entity { cursor: default; }
-.tname { font: 600 13px/1.25 system-ui, sans-serif; color: #fff;
-  text-shadow: 0 1px 3px rgba(0,0,0,.8); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-.tmeta { margin-top: 5px; font: 11px system-ui, sans-serif; color: rgba(255,255,255,.8); text-shadow: 0 1px 2px rgba(0,0,0,.8); }
+.tname {
+  font-family: var(--display); font-weight: 800; font-size: clamp(13px, 1.2vw, 22px); line-height: 1.04;
+  letter-spacing: -0.02em; color: inherit;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
+.tmeta { margin-top: 8px; font-family: var(--mono); font-size: 10px; letter-spacing: .12em;
+  text-transform: uppercase; color: inherit; opacity: .68; }
 
-.list { width: min(760px, 94vw); height: calc(100vh - 110px); overflow-y: auto; padding: 6px 4px 30px; }
-.lhead { color: #6b7682; font: 12px system-ui, sans-serif; padding: 4px 8px 10px; }
-.row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 7px;
-  border: 1px solid #161c24; margin-bottom: 6px; background: #0c1014; }
-.row:hover { background: #11161c; border-color: #243040; }
-.rk { font-size: 13px; flex: none; width: 14px; text-align: center; }
-.rt { flex: 1; color: #d6dde4; font: 13px/1.4 system-ui, sans-serif; }
-.rbar { flex: none; width: 70px; height: 6px; background: #161c24; border-radius: 3px; overflow: hidden; }
+/* leaf list — editorial, roomy, readable */
+.list { width: min(720px, 90vw); height: calc(100vh - 200px); overflow-y: auto; padding: 4px 2px 40px; }
+.lhead { font-family: var(--mono); font-size: 11px; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--muted); padding: 2px 4px 18px; }
+.row { display: flex; align-items: center; gap: 16px; padding: 15px 4px; border-bottom: 1px solid var(--line); }
+.row:hover { background: rgba(244,241,234,0.02); }
+.rk { font-size: 13px; flex: none; width: 16px; text-align: center; }
+.rt { flex: 1; color: var(--ink); font-family: var(--body); font-size: 15px; line-height: 1.5; font-weight: 500; }
+.rbar { flex: none; width: 64px; height: 4px; background: rgba(244,241,234,0.08); border-radius: 3px; overflow: hidden; }
 .rbar i { display: block; height: 100%; border-radius: 3px; }
 
-.hud { position: fixed; top: 12px; left: 14px; z-index: 10; background: #11151ad9; color: #cdd3da;
-  padding: 8px 13px; border-radius: 9px; border: 1px solid #1d2530; backdrop-filter: blur(6px);
-  font: 13px system-ui, sans-serif; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; max-width: 92vw; }
-.hud b { color: #7fd1ae; letter-spacing: .4px; }
-.crumbs a { color: #9ec1e0; cursor: pointer; }
-.crumbs a.here { color: #f0c987; font-weight: 600; }
-.crumbs .sep { color: #46505c; }
-.stat { color: #8a96a2; }
-.err { color: #e06c75; }
-.path { position: fixed; bottom: 12px; left: 14px; right: 14px; z-index: 10; color: #cfd6de;
-  font: 13px system-ui, sans-serif; background: #11151ad9; backdrop-filter: blur(6px);
-  padding: 7px 13px; border-radius: 9px; border: 1px solid #1d2530;
+.hud { position: fixed; top: 26px; left: 32px; z-index: 10; color: var(--ink);
+  font-family: var(--body); font-size: 13px; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; max-width: 88vw; }
+.hud b { font-family: var(--display); font-weight: 800; font-size: 17px; letter-spacing: -0.02em; color: var(--ink); }
+.crumbs a { color: var(--muted); cursor: pointer; transition: color .15s; }
+.crumbs a:hover { color: var(--ink); }
+.crumbs a.here { color: #f2a93e; font-weight: 600; }
+.crumbs .sep { color: #3a3630; margin: 0 2px; }
+.stat { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; color: var(--muted); }
+.err { color: #e8705e; }
+.path { position: fixed; bottom: 26px; left: 32px; right: 32px; z-index: 10; color: var(--ink);
+  font-family: var(--body); font-size: 14px; font-weight: 500;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.list::-webkit-scrollbar { width: 8px; } .list::-webkit-scrollbar-thumb { background: #1d1c19; border-radius: 4px; }
 </style>
