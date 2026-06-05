@@ -4,7 +4,7 @@ import ForceGraph3D from '3d-force-graph'
 import * as THREE from 'three'
 import SpriteText from 'three-spritetext'
 
-const crumbs = ref([])     // [{id,label}] root → current
+const crumbs = ref([])
 const stats = ref('loading…')
 const err = ref('')
 const graphEl = ref(null)
@@ -13,10 +13,11 @@ let G = null
 let timer = null
 let raw = { nodes: [], links: [], kerns: [] }
 let kernsById = {}
-let current = null         // kern id we are inside
+let current = null
 let levelKey = ''
 let wantFit = false
-const pos = new Map()      // id -> {x,y,z} remembered within a level
+let boundary = null
+let boundaryLabel = null
 
 function colorFor(id) {
   let h = 0
@@ -40,17 +41,14 @@ function computeCrumbs() {
   crumbs.value = out
 }
 
-// One level only: the current sphere's own thoughts + its direct sub-spheres.
 function levelData() {
   const cur = current
   const ents = raw.nodes.filter(n => n.kern === cur)
   const entIds = new Set(ents.map(e => e.id))
   const kids = raw.kerns.filter(k => k.parent === cur)
-
-  const mk = (o) => { const p = pos.get(o.id); return p ? { ...o, x: p.x, y: p.y, z: p.z } : o }
   const nodes = [
-    ...ents.map(e => mk({ ...e, _t: 'entity' })),
-    ...kids.map(k => mk({ id: k.id, label: k.label, named: k.named, count: k.count, _t: 'kern' })),
+    ...ents.map(e => ({ ...e, _t: 'entity' })),
+    ...kids.map(k => ({ id: k.id, label: k.label, named: k.named, count: k.count, _t: 'kern' })),
   ]
   const links = raw.links
     .filter(l => entIds.has(l.source.id ?? l.source) && entIds.has(l.target.id ?? l.target))
@@ -68,10 +66,7 @@ function render(refit) {
 
 function go(id) {
   if (!kernsById[id]) return
-  // remember current node positions so siblings don't jump on return
-  for (const n of (G.graphData().nodes || [])) if (n.x != null) pos.set(n.id, { x: n.x, y: n.y, z: n.z })
   current = id
-  pos.clear() // fresh layout for the new level (small, settles fast = smooth)
   computeCrumbs()
   render(true)
 }
@@ -79,6 +74,36 @@ function go(id) {
 function up() {
   const p = kernsById[current]?.parent
   if (p && kernsById[p]) go(p)
+}
+
+// Distinct geometry per info type so you can read what's what at a glance:
+// fact = octahedron, document = cube, question = cone, claim/other = sphere.
+// Colour still encodes the owning sphere (cluster).
+function entityMesh(n) {
+  const s = 2.4 + (+n.heat || 0) * 1.4
+  let geo
+  switch (n.kind) {
+    case 'Fact': geo = new THREE.OctahedronGeometry(s * 1.25); break
+    case 'Document': geo = new THREE.BoxGeometry(s * 1.6, s * 1.6, s * 1.6); break
+    case 'Question': geo = new THREE.ConeGeometry(s, s * 2, 7); break
+    default: geo = new THREE.SphereGeometry(s, 12, 9)
+  }
+  return new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: colorFor(n.kern || n.id) }))
+}
+
+function updateBoundary() {
+  const ns = (G.graphData().nodes || []).filter(n => n.x != null)
+  if (!ns.length) { boundary.visible = false; boundaryLabel.visible = false; return }
+  let cx = 0, cy = 0, cz = 0
+  for (const n of ns) { cx += n.x; cy += n.y; cz += n.z }
+  cx /= ns.length; cy /= ns.length; cz /= ns.length
+  let r = 24
+  for (const n of ns) r = Math.max(r, Math.hypot(n.x - cx, n.y - cy, n.z - cz))
+  r += 16
+  boundary.visible = true; boundary.position.set(cx, cy, cz); boundary.scale.set(r, r, r)
+  boundaryLabel.visible = true; boundaryLabel.position.set(cx, cy + r + 8, cz)
+  const here = crumbs.value[crumbs.value.length - 1]
+  boundaryLabel.text = here ? here.label : ''
 }
 
 async function load() {
@@ -96,8 +121,7 @@ onMounted(() => {
   G = ForceGraph3D()(graphEl.value)
     .backgroundColor('#06080b')
     .showNavInfo(false)
-    .cooldownTicks(80)
-    .nodeRelSize(4)
+    .cooldownTicks(90)
     .nodeLabel((n) => n._t === 'kern'
       ? `◉ ${n.label} · ${n.count} thoughts — click to enter`
       : `${n.kind} · heat ${(+n.heat).toFixed(2)} · conf ${(+n.conf).toFixed(2)}\n${n.label}`)
@@ -107,7 +131,7 @@ onMounted(() => {
         const r = 6 + Math.cbrt(n.count || 1) * 4
         grp.add(new THREE.Mesh(
           new THREE.SphereGeometry(r, 20, 16),
-          new THREE.MeshLambertMaterial({ color: colorFor(n.id), transparent: true, opacity: 0.35, depthWrite: false })
+          new THREE.MeshLambertMaterial({ color: colorFor(n.id), transparent: true, opacity: 0.30, depthWrite: false })
         ))
         const t = new SpriteText(n.named ? n.label : '(unnamed)')
         t.color = colorFor(n.id).getStyle(); t.textHeight = 6; t.position.y = r + 6
@@ -115,17 +139,27 @@ onMounted(() => {
         grp.add(t)
         return grp
       }
-      const s = new THREE.Mesh(
-        new THREE.SphereGeometry(2 + (+n.heat || 0) * 1.5, 10, 8),
-        new THREE.MeshLambertMaterial({ color: colorFor(n.kern || n.id) })
-      )
-      return s
+      return entityMesh(n)
     })
-    .linkColor(() => 'rgba(150,170,190,0.35)')
-    .linkOpacity(0.4)
+    .linkColor(() => 'rgba(150,170,190,0.30)')
+    .linkOpacity(0.35)
     .onNodeClick((n) => { if (n._t === 'kern') go(n.id) })
     .onBackgroundClick(() => up())
-    .onEngineStop(() => { if (wantFit) { G.zoomToFit(700, 60); wantFit = false } })
+    .onEngineStop(() => { if (wantFit) { G.zoomToFit(700, 70); wantFit = false } })
+
+  // Faint enclosing field: the sphere you are currently inside. Gives spatial
+  // context without adding clutter — a ghost wireframe + a big dim label.
+  boundary = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 28, 20),
+    new THREE.MeshBasicMaterial({ color: 0x3a4a64, wireframe: true, transparent: true, opacity: 0.06 })
+  )
+  G.scene().add(boundary)
+  boundaryLabel = new SpriteText('')
+  boundaryLabel.color = 'rgba(120,140,170,0.35)'; boundaryLabel.textHeight = 11
+  boundaryLabel.material.depthWrite = false
+  G.scene().add(boundaryLabel)
+  G.onEngineTick(updateBoundary)
+
   load()
   timer = setInterval(load, 5000)
 })
@@ -145,6 +179,11 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
     <span class="stat">· {{ stats }}</span>
     <span v-if="err" class="err"> — {{ err }}</span>
   </div>
+  <div class="legend">
+    <span>● claim</span><span class="d">◆ fact</span><span class="d">■ document</span>
+    <span class="d">▲ question</span><span class="d">◉ sub-sphere</span>
+    <span class="dim">· color = sphere · size = heat</span>
+  </div>
   <div class="hint">click a sphere to step in · click empty space to go up · drag to orbit</div>
   <div ref="graphEl" class="graph"></div>
 </template>
@@ -163,5 +202,12 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
 .crumbs .sep { color: #4a5563; }
 .stat { color: #9aa6b2; }
 .err { color: #e06c75; }
+.legend {
+  position: fixed; top: 52px; left: 12px; z-index: 10; color: #9aa6b2;
+  font: 12px system-ui, sans-serif; background: #11151acc; padding: 4px 10px;
+  border-radius: 6px; display: flex; gap: 12px;
+}
+.legend .d { color: #cdd3da; }
+.legend .dim { color: #5a6573; }
 .hint { position: fixed; bottom: 10px; left: 12px; z-index: 10; color: #5a6573; font: 12px system-ui, sans-serif; }
 </style>
