@@ -15,6 +15,8 @@ export default defineConfig({
       // POST + SSE stream for the oracle. http-proxy streams chunked responses
       // through unbuffered, so token events arrive live.
       '/ask': { target: KERN, changeOrigin: true },
+      // POST: wiki-style correction of a thought/reason (→ dirty → reembed).
+      '/edit': { target: KERN, changeOrigin: true },
     },
   },
 })
