@@ -163,3 +163,75 @@ fn int8_cosine_distance(a: &[i8], b: &[i8]) -> f32 {
 	let cos = ((dot as f32) / denom).clamp(-1.0, 1.0);
 	1.0 - cos
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn int8_round_trip_within_scale() {
+		let v = vec![1.0, -2.0, 0.5, 0.0, -0.25];
+		let qv = QuantizedVec::encode(&v, QuantizationMode::Int8);
+		let d = qv.decode();
+		assert_eq!(d.len(), v.len());
+		for (orig, got) in v.iter().zip(&d) {
+			assert!(
+				(orig - got).abs() <= qv.scale as f64 + 1e-9,
+				"{orig} vs {got} (scale {})",
+				qv.scale
+			);
+		}
+	}
+
+	#[test]
+	fn none_mode_is_lossless() {
+		let v = vec![1.5, -0.3, 9.0];
+		let qv = QuantizedVec::encode(&v, QuantizationMode::None);
+		assert_eq!(qv.decode(), v);
+	}
+
+	#[test]
+	fn empty_and_zero_vectors() {
+		let empty = QuantizedVec::encode(&[], QuantizationMode::Int8);
+		assert_eq!(empty.dim(), 0);
+		assert!(empty.decode().is_empty());
+
+		let zero = QuantizedVec::encode(&[0.0, 0.0, 0.0], QuantizationMode::Int8);
+		assert!(zero.q.iter().all(|&q| q == 0));
+		assert_eq!(zero.decode(), vec![0.0, 0.0, 0.0]);
+	}
+
+	#[test]
+	fn int8_cosine_identical_is_zero_orthogonal_is_one() {
+		let a = QuantizedVec::encode(&[1.0, 2.0, 3.0], QuantizationMode::Int8);
+		let b = QuantizedVec::encode(&[1.0, 2.0, 3.0], QuantizationMode::Int8);
+		assert!(quantized_cosine_distance(&a, &b) < 1e-3);
+
+		let x = QuantizedVec::encode(&[1.0, 0.0], QuantizationMode::Int8);
+		let y = QuantizedVec::encode(&[0.0, 1.0], QuantizationMode::Int8);
+		assert!((quantized_cosine_distance(&x, &y) - 1.0).abs() < 1e-3);
+	}
+
+	#[test]
+	fn mixed_mode_falls_back_to_decoded_f64() {
+		let a = QuantizedVec::encode(&[1.0, 2.0, 3.0], QuantizationMode::Int8);
+		let b = QuantizedVec::encode(&[1.0, 2.0, 3.0], QuantizationMode::None);
+		assert!(quantized_cosine_distance(&a, &b) < 1e-2);
+	}
+
+	#[test]
+	fn f64_cosine_edge_cases() {
+		assert_eq!(f64_cosine_distance(&[], &[]), 1.0);
+		assert_eq!(f64_cosine_distance(&[1.0, 2.0], &[1.0]), 1.0); // len mismatch
+		assert_eq!(f64_cosine_distance(&[0.0, 0.0], &[1.0, 1.0]), 1.0); // zero vec
+		assert!(f64_cosine_distance(&[1.0, 1.0], &[1.0, 1.0]) < 1e-12); // identical
+	}
+
+	#[test]
+	fn mode_parse_round_trip() {
+		assert_eq!(QuantizationMode::parse("int8"), Some(QuantizationMode::Int8));
+		assert_eq!(QuantizationMode::parse(" NONE "), Some(QuantizationMode::None));
+		assert_eq!(QuantizationMode::parse("bogus"), None);
+		assert_eq!(QuantizationMode::Int8.as_str(), "int8");
+	}
+}
