@@ -10,6 +10,8 @@ const mode = ref('cube')      // 'cube' | 'list'
 const tiles = ref([])
 const listItems = ref([])
 const side = ref(480)
+const zoomDir = ref('in')
+const levelId = ref('')
 const stageEl = ref(null)
 
 let timer = null
@@ -56,6 +58,7 @@ function info(ref) { return ref.type === 'entity' ? `${ref.kind} · heat ${(+ref
 
 function relayout() {
   const cur = stack[stack.length - 1]
+  levelId.value = cur.id
   crumbs.value = stack.map((n, i) => ({ id: n.id, label: i === 0 ? 'root' : n.label }))
   const kids = cur.children || []
   const kernKids = kids.filter(c => c.type === 'kern')
@@ -68,22 +71,24 @@ function relayout() {
     return
   }
 
-  // Otherwise → squarified cube of sub-topics (+ any loose thoughts), centered
-  // with generous whitespace around it (it's a framed piece, not edge-to-edge).
+  // Otherwise → a framed square holding a bento grid of readable cards. Cards
+  // never shrink below a min size: bigger topics span more cells, and if there
+  // are more than fit, the square scrolls. (No tiny unreadable tiles.)
   mode.value = 'cube'
-  // a real square, sized off the smaller viewport dim, capped, with margin.
-  const s = Math.round(Math.max(280, Math.min(stageEl.value.clientWidth, stageEl.value.clientHeight, 760) * 0.62, 0))
-  side.value = Math.min(s, 620)
-  const data = kids.map(c => ({ ref: c, value: d3Count(c) }))
-  const r = d3.hierarchy({ children: data }).sum(d => d.value || 0).sort((a, b) => (b.value || 0) - (a.value || 0))
-  d3.treemap().tile(d3.treemapSquarify.ratio(1)).size([s, s]).round(true).paddingInner(8)(r)
-  tiles.value = (r.children || []).map((n, i) => ({ ref: n.data.ref, x: n.x0, y: n.y0, w: n.x1 - n.x0, h: n.y1 - n.y0, n: n.value, i }))
-  stats.value = `${raw.nodes.length} thoughts · ${raw.kerns.length} spheres · here: ${r.value}`
+  const s = Math.round(Math.min(stageEl.value.clientWidth, stageEl.value.clientHeight, 820) * 0.66)
+  side.value = Math.max(300, Math.min(s, 660))
+  const counted = kids.map(c => ({ ref: c, count: d3Count(c) })).sort((a, b) => b.count - a.count)
+  const max = counted[0]?.count || 1
+  tiles.value = counted.map((t, i) => ({
+    ...t, i,
+    span: t.ref.type === 'entity' ? 'sm' : (t.count >= max * 0.5 ? 'lg' : t.count >= max * 0.18 ? 'md' : 'sm'),
+  }))
+  stats.value = `${raw.nodes.length} thoughts · ${raw.kerns.length} spheres · here: ${kids.length} topics`
 }
 
-function enter(ref) { if (ref.type !== 'kern') return; const p = findPath(treeData, ref.id); if (p) { stack = p; relayout() } }
-function out() { if (stack.length > 1) { stack.pop(); relayout() } }
-function goTo(id) { const i = stack.findIndex(n => n.id === id); if (i >= 0) { stack.length = i + 1; relayout() } }
+function enter(ref) { if (ref.type !== 'kern') return; const p = findPath(treeData, ref.id); if (p) { zoomDir.value = 'in'; stack = p; relayout() } }
+function out() { if (stack.length > 1) { zoomDir.value = 'out'; stack.pop(); relayout() } }
+function goTo(id) { const i = stack.findIndex(n => n.id === id); if (i >= 0) { zoomDir.value = 'out'; stack.length = i + 1; relayout() } }
 function onKey(ev) { if (ev.key === 'Escape') { ev.preventDefault(); out() } }
 
 async function load() {
@@ -126,12 +131,14 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); window.removeEventListe
   </div>
 
   <div ref="stageEl" class="stage">
-    <div v-if="mode === 'cube'" class="cube" :style="{ width: side + 'px', height: side + 'px' }">
-      <div v-for="t in tiles" :key="t.ref.id" class="tile" :class="t.ref.type"
-        :style="{ left: t.x + 'px', top: t.y + 'px', width: t.w + 'px', height: t.h + 'px', background: fill(t.ref), color: textColor(t.ref), '--i': t.i }"
-        @click="enter(t.ref)" @mouseenter="detail = info(t.ref)" @mouseleave="detail = ''">
-        <div class="tname">{{ t.ref.label }}</div>
-        <div class="tmeta">{{ meta(t.ref) }}</div>
+    <div v-if="mode === 'cube'" class="frame" :style="{ width: side + 'px', height: side + 'px' }">
+      <div class="grid" :class="'z-' + zoomDir" :key="levelId">
+        <div v-for="t in tiles" :key="t.ref.id" class="card" :class="[t.ref.type, t.span]"
+          :style="{ background: fill(t.ref), color: textColor(t.ref) }"
+          @click="enter(t.ref)" @mouseenter="detail = info(t.ref)" @mouseleave="detail = ''">
+          <div class="cname">{{ t.ref.label }}</div>
+          <div class="cmeta">{{ meta(t.ref) }}</div>
+        </div>
       </div>
     </div>
 
@@ -169,25 +176,34 @@ html, body, #app { height: 100%; margin: 0; }
     radial-gradient(120% 90% at 50% -10%, #16130f 0%, #0a0a0c 55%, #08080a 100%);
 }
 
-.cube { position: relative; }
-.tile {
-  position: absolute; border-radius: 14px; overflow: hidden; padding: 12px;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.07), 0 8px 24px -12px rgba(0,0,0,0.7);
-  cursor: pointer; transition: transform .18s cubic-bezier(.2,.7,.2,1), filter .18s, box-shadow .18s;
-  animation: pop .42s both cubic-bezier(.2,.8,.2,1); animation-delay: calc(var(--i) * 22ms);
-}
-@keyframes pop { from { opacity: 0; transform: scale(.92); } to { opacity: 1; transform: scale(1); } }
-.tile.kern:hover { transform: translateY(-3px) scale(1.015); filter: brightness(1.12);
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.5), 0 16px 36px -14px rgba(0,0,0,0.8); z-index: 3; }
-.tile.entity { cursor: default; }
-.tname {
-  font-family: var(--display); font-weight: 800; font-size: clamp(13px, 1.2vw, 22px); line-height: 1.04;
-  letter-spacing: -0.02em; color: inherit;
-  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
-}
-.tmeta { margin-top: 8px; font-family: var(--mono); font-size: 10px; letter-spacing: .12em;
-  text-transform: uppercase; color: inherit; opacity: .68; }
+.frame { overflow-y: auto; overflow-x: hidden; border-radius: 20px;
+  box-shadow: inset 0 0 0 1px rgba(244,241,234,0.06); padding: 14px;
+  scrollbar-width: thin; scrollbar-color: #26241f transparent; }
+.frame::-webkit-scrollbar { width: 8px; } .frame::-webkit-scrollbar-thumb { background: #26241f; border-radius: 4px; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-auto-rows: 150px; grid-auto-flow: dense; gap: 14px; min-height: 100%; }
+.grid.z-in { animation: zin .4s cubic-bezier(.2,.8,.2,1); }
+.grid.z-out { animation: zout .4s cubic-bezier(.2,.8,.2,1); }
+@keyframes zin { from { opacity: 0; transform: scale(.86); } to { opacity: 1; transform: scale(1); } }
+@keyframes zout { from { opacity: 0; transform: scale(1.12); } to { opacity: 1; transform: scale(1); } }
+
+.card { border-radius: 16px; padding: 16px; overflow: hidden;
+  display: flex; flex-direction: column; justify-content: flex-end; gap: 8px;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08), 0 10px 28px -16px rgba(0,0,0,0.75);
+  cursor: pointer; transition: transform .18s cubic-bezier(.2,.7,.2,1), filter .18s, box-shadow .18s; }
+.card.lg { grid-column: span 2; grid-row: span 2; }
+.card.md { grid-column: span 2; }
+.card.entity { cursor: default; }
+.card.kern:hover { transform: translateY(-4px); filter: brightness(1.1);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.55), 0 22px 44px -18px rgba(0,0,0,0.85); }
+.cname { font-family: var(--display); font-weight: 800; line-height: 1.06; letter-spacing: -0.02em;
+  color: inherit; font-size: 17px;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.card.lg .cname { font-size: 26px; -webkit-line-clamp: 5; }
+.card.md .cname { font-size: 20px; }
+.cmeta { font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+  color: inherit; opacity: .66; }
 
 /* leaf list — editorial, roomy, readable */
 .list { width: min(720px, 90vw); height: calc(100vh - 200px); overflow-y: auto; padding: 4px 2px 40px; }
