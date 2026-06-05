@@ -38,6 +38,12 @@ pub struct CaptureConfig {
 	/// grown, dragging the mean down) out of that surface. Set to `0.0` to
 	/// disable the gate. Default `0.35`.
 	pub digest_min_trust: f32,
+	/// Approximate token budget for the digest body. Claims are added best-first
+	/// (heat × confidence) until this many tokens are used, trimmed greedily —
+	/// context rot means attention degrades with length, so a tight budget beats
+	/// a long dump. `digest_k` still caps item count. `0` disables the token cap.
+	/// Default `1500`.
+	pub digest_token_budget: usize,
 	/// Retention window, in seconds, for archived deltas under `<dir>/done/`.
 	/// The graph is the durable copy after ingest; the archive is only a
 	/// transient audit trail, so it is swept each drain cycle and entries older
@@ -55,6 +61,7 @@ impl Default for CaptureConfig {
 			digest_secs: 30,
 			digest_k: 40,
 			digest_min_trust: 0.35,
+			digest_token_budget: 1500,
 			done_retention_secs: 7 * 24 * 60 * 60,
 		}
 	}
@@ -74,6 +81,7 @@ mod tests {
 		assert_eq!(c.digest_secs, 30);
 		assert_eq!(c.digest_k, 40);
 		assert_eq!(c.digest_min_trust, 0.35);
+		assert_eq!(c.digest_token_budget, 1500);
 		assert_eq!(c.done_retention_secs, 7 * 24 * 60 * 60);
 	}
 }

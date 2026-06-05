@@ -559,12 +559,19 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 			let g_digest = g.clone();
 			let k = cfg.capture.digest_k;
 			let min_trust = cfg.capture.digest_min_trust as f64;
+			let token_budget = cfg.capture.digest_token_budget;
 			let every = std::time::Duration::from_secs(cfg.capture.digest_secs);
 			tokio::spawn(async move {
 				loop {
 					{
 						let g = read_recovered(&g_digest);
-						crate::retrieval::digest::write_digest(&g, &digest_path, k, min_trust);
+						crate::retrieval::digest::write_digest(
+							&g,
+							&digest_path,
+							k,
+							min_trust,
+							token_budget,
+						);
 					}
 					tokio::time::sleep(every).await;
 				}
