@@ -425,9 +425,14 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	} else {
 		cli.reason_model.clone()
 	};
+	// The daemon embeds from its CONFIG, not the CLI flags. The `--daemon`
+	// dispatch hardcodes cli.embed_* to DEFAULT_EMBED_* (a non-empty constant),
+	// so reading them here ignored `[embed]` in kern.toml — the daemon embedded
+	// with the default model even when the graph was built with another, a
+	// dimension mismatch that makes every cosine degenerate. Use cfg.embed.
 	let llm_client = build_llm(
-		&cli.embed_url,
-		&cli.embed_model,
+		&cfg.embed.url,
+		&cfg.embed.model,
 		&cfg.embed.key,
 		&reason_url,
 		&reason_model,
