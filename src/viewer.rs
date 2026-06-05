@@ -70,9 +70,28 @@ async fn graph_json(State(g): State<Graph>) -> Json<serde_json::Value> {
 		}
 	}
 
+	// Sphere structure: the recursive kern tree (purpose, radii, parent/children,
+	// member count). The viewer renders each kern as a sphere you can step into.
+	let kern_meta: Vec<_> = kerns
+		.iter()
+		.map(|k| {
+			json!({
+				"id": k.id,
+				"label": if k.purpose_text.trim().is_empty() { "(unnamed)".to_string() } else { truncate(&k.purpose_text, 60) },
+				"named": !k.purpose_text.trim().is_empty(),
+				"parent": k.parent,
+				"children": k.children,
+				"inner_radius": k.inner_radius,
+				"outer_radius": k.outer_radius,
+				"count": k.entities.len(),
+			})
+		})
+		.collect();
+
 	Json(json!({
 		"nodes": nodes,
 		"links": links,
-		"kerns": kerns.len(),
+		"kerns": kern_meta,
+		"kern_count": kerns.len(),
 	}))
 }
