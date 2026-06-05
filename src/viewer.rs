@@ -106,11 +106,30 @@ const VIEWER_HTML: &str = r#"<!doctype html>
       .linkColor(() => 'rgba(120,140,160,0.25)')
       .linkDirectionalArrowLength(2.5)
       .linkDirectionalArrowRelPos(1);
+
+    // Persist node objects across refreshes so positions are kept. Only reset
+    // the layout (which reheats the simulation) when the TOPOLOGY changes —
+    // nodes/edges added or removed. Pure field updates (heat/conf) mutate the
+    // existing objects in place and render live without a jarring rebuild.
+    const byId = new Map();
+    let topoKey = '';
     async function load() {
       try {
-        const r = await fetch('/graph');
-        const d = await r.json();
-        G.graphData({ nodes: d.nodes, links: d.links });
+        const d = await (await fetch('/graph')).json();
+        const incoming = new Set(d.nodes.map(n => n.id));
+        // Update/keep existing nodes; track new ones.
+        const nodes = d.nodes.map(n => {
+          const ex = byId.get(n.id);
+          if (ex) { ex.label = n.label; ex.kind = n.kind; ex.kern = n.kern; ex.heat = n.heat; ex.conf = n.conf; return ex; }
+          byId.set(n.id, n); return n;
+        });
+        for (const id of [...byId.keys()]) if (!incoming.has(id)) byId.delete(id);
+
+        const key = [...incoming].sort().join() + '|' + d.links.map(l => l.source + '>' + l.target).sort().join();
+        if (key !== topoKey) {
+          topoKey = key;
+          G.graphData({ nodes, links: d.links }); // only new nodes settle; rest hold position
+        }
         document.getElementById('stats').textContent =
           `${d.nodes.length} thoughts · ${d.links.length} reasons · ${d.kerns} kerns`;
         document.getElementById('err').textContent = '';
