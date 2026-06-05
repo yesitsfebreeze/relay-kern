@@ -448,7 +448,12 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 			let text = text.to_string();
 			match tokio::runtime::Handle::try_current() {
 				Ok(h) => {
-					let result = std::thread::scope(|_| h.block_on(c.embed(&text)));
+					// `block_in_place` hands this worker thread back to the
+					// runtime while we block, so `block_on` is legal here.
+					// Plain `block_on` on a runtime worker panics with
+					// "Cannot start a runtime from within a runtime".
+					let result =
+						tokio::task::block_in_place(|| h.block_on(c.embed(&text)));
 					result.map_err(|e: crate::llm::LlmError| e.to_string())
 				}
 				Err(_) => Err("no runtime".to_string()),

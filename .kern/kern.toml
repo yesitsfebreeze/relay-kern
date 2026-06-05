@@ -1,11 +1,19 @@
 # Project-scope kern config. Merges over the user-scope kern.toml.
 # (Layered parsing now handles leading comments + [section] headers.)
 
+[embed]
+# MUST match the model the existing graph vectors were created with — this
+# graph was built with nomic-embed-text (768-d). Switching to a different-
+# dimension model (e.g. bge-m3, 1024-d) makes every cosine degenerate and the
+# router spawns an empty kern per ingest. Re-embed the whole graph before
+# changing this.
+url = "http://localhost:11434"
+model = "nomic-embed-text"
+
 [reason]
 # Model for distillation + smart-split + edge proposal. Local Ollama.
-# qwen2.5 = default; swap to a larger model for higher-quality consolidation.
 url = "http://localhost:11434"
-model = "qwen2.5"
+model = "gemma4:latest"
 
 [capture]
 # Self-learning: capture Claude Code sessions -> distill -> graph -> digest.
