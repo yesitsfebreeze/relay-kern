@@ -221,8 +221,14 @@ impl Client {
 				"messages": msgs,
 				"stream": true,
 			});
+			// Override the client's 120s TOTAL timeout: a streamed generation can
+			// take far longer to finish than 120s (big RAG prompt + CPU inference),
+			// and a total-response timeout would abort it mid-stream and surface as
+			// "error decoding response body". 600s is a generous ceiling for slow
+			// local models; tokens still stream as they arrive.
 			let resp = match client.inner.http.post(&url)
 				.headers(client.inner.reason_headers.clone())
+				.timeout(Duration::from_secs(600))
 				.json(&body)
 				.send()
 				.await

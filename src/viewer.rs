@@ -404,8 +404,19 @@ async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl 
 /// browser links back to the source tiles.
 fn build_ask_prompt(sources: &[Value], chains: &[String], question: &str) -> String {
 	let mut p = String::from("Context from knowledge graph:\n\n");
-	for c in chains.iter().filter(|c| !c.trim().is_empty()) {
-		p.push_str(c);
+	// Cap the provenance chains in the PROMPT — format_chains can emit kilobytes
+	// (full entity texts repeated across chains), which balloons prompt-eval
+	// latency on local CPU models. The full chains still reach the UI via the
+	// `sources` event; the model only needs a compact structural hint.
+	let joined: String = chains
+		.iter()
+		.map(|c| c.trim())
+		.filter(|c| !c.is_empty())
+		.collect::<Vec<_>>()
+		.join("\n");
+	if !joined.is_empty() {
+		let cap = joined.char_indices().nth(800).map(|(i, _)| i).unwrap_or(joined.len());
+		p.push_str(&joined[..cap]);
 		p.push('\n');
 	}
 	p.push_str("Relevant facts:\n");
