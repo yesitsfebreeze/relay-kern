@@ -252,8 +252,15 @@ let mut graph = write_recovered(g);
 }
 
 pub fn do_persist(g: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
-let graph = read_recovered(g);
+	let graph = read_recovered(g);
 	if graph.data_dir.is_empty() {
+		return;
+	}
+	// The root carries authoritative fields (purpose/descriptors/radii) that
+	// live on `graph.root`, not the map entry — persist it through the same
+	// merge `save_all` uses so a root Persist task can't drop them.
+	if kern_id == graph.root.id {
+		let _ = save_kern(&graph.data_dir, &crate::base::persist::merged_root(&graph));
 		return;
 	}
 	let kern = match graph.loaded(kern_id) {

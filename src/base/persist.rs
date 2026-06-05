@@ -253,6 +253,30 @@ pub fn load_dir(dir: &str) -> Result<GraphGnn, PersistError> {
 	Ok(g)
 }
 
+/// The canonical on-disk root kern: the in-memory map entry overlaid with the
+/// authoritative root-only fields from `g.root` (id, root_id, purpose, radii,
+/// descriptors). Both `save_all` and the tick worker's per-kern persist write
+/// the root through this, so a `Persist` task targeting the root can never
+/// clobber those fields with a stale map entry.
+pub fn merged_root(g: &GraphGnn) -> Kern {
+	let root_id = g.root.id.clone();
+	let mut merged = g
+		.map()
+		.get(&root_id)
+		.cloned()
+		.unwrap_or_else(|| g.root.clone());
+	merged.id = g.root.id.clone();
+	merged.root_id = g.root.root_id.clone();
+	merged.purpose_text = g.root.purpose_text.clone();
+	merged.purpose_vec = g.root.purpose_vec.clone();
+	merged.inner_radius = g.root.inner_radius;
+	merged.outer_radius = g.root.outer_radius;
+	for (k, v) in &g.root.descriptors {
+		merged.descriptors.insert(k.clone(), v.clone());
+	}
+	merged
+}
+
 pub fn save_all(g: &GraphGnn) -> Result<(), PersistError> {
 	if g.data_dir.is_empty() {
 		return Ok(());
@@ -266,21 +290,7 @@ pub fn save_all(g: &GraphGnn) -> Result<(), PersistError> {
 		save_kern(&g.data_dir, kern)?;
 	}
 
-	let mut merged_root = g
-		.map()
-		.get(&root_id)
-		.cloned()
-		.unwrap_or_else(|| g.root.clone());
-	merged_root.id = g.root.id.clone();
-	merged_root.root_id = g.root.root_id.clone();
-	merged_root.purpose_text = g.root.purpose_text.clone();
-	merged_root.purpose_vec = g.root.purpose_vec.clone();
-	merged_root.inner_radius = g.root.inner_radius;
-	merged_root.outer_radius = g.root.outer_radius;
-	for (k, v) in &g.root.descriptors {
-		merged_root.descriptors.insert(k.clone(), v.clone());
-	}
-	save_kern(&g.data_dir, &merged_root)?;
+	save_kern(&g.data_dir, &merged_root(g))?;
 	save_network_id(&g.data_dir, &g.network_id);
 	write_quant_mode(&quant_dir_sidecar(&g.data_dir), g.quant_mode);
 	Ok(())
@@ -324,5 +334,49 @@ fn load_network_id(dir: &str) -> String {
 	match bincode::serde::decode_from_slice::<GraphMeta, _>(&data, bincode_cfg()) {
 		Ok((m, _)) => m.network_id,
 		Err(_) => String::new(),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::base::graph::GraphGnn;
+	use tempfile::tempdir;
+
+	#[test]
+	fn merged_root_overlays_authoritative_fields_over_stale_map_entry() {
+		let mut g = GraphGnn::new();
+		// Stale root entry in the map: empty purpose/descriptors.
+		let mut stale = g.root.clone();
+		stale.purpose_text = String::new();
+		stale.descriptors.clear();
+		g.register(stale);
+		// Authoritative values live on g.root.
+		g.root.purpose_text = "guiding purpose".to_string();
+		g.root
+			.descriptors
+			.insert("chat".to_string(), "desc".to_string());
+
+		let merged = merged_root(&g);
+		assert_eq!(merged.id, g.root.id);
+		assert_eq!(merged.purpose_text, "guiding purpose");
+		assert_eq!(merged.descriptors.get("chat").map(String::as_str), Some("desc"));
+	}
+
+	#[test]
+	fn root_persist_via_merged_root_survives_reload() {
+		let dir = tempdir().unwrap();
+		let mut g = GraphGnn::new();
+		g.data_dir = dir.path().to_string_lossy().to_string();
+		g.root.purpose_text = "P".to_string();
+		g.root.descriptors.insert("k".to_string(), "v".to_string());
+
+		fs::create_dir_all(&g.data_dir).unwrap();
+		// This is what do_persist(root) and save_all now write for the root.
+		save_kern(&g.data_dir, &merged_root(&g)).unwrap();
+
+		let reloaded = load_kern(&g.data_dir, &g.root.id).unwrap();
+		assert_eq!(reloaded.purpose_text, "P");
+		assert_eq!(reloaded.descriptors.get("k").map(String::as_str), Some("v"));
 	}
 }
