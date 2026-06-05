@@ -29,6 +29,7 @@ use serde_json::{json, Value};
 
 use crate::base::graph::GraphGnn;
 use crate::base::locks::read_recovered;
+use crate::base::search::{find_entity, find_reason, search_all_unlocked, search_reasons_all_unlocked};
 use crate::base::util::truncate;
 
 type Graph = Arc<RwLock<GraphGnn>>;
@@ -42,6 +43,9 @@ const STALE: Duration = Duration::from_secs(20);
 const FANOUT_TIMEOUT: Duration = Duration::from_secs(3);
 /// How often a non-hub daemon retries binding the aggregator address.
 const FAILOVER_RETRY: Duration = Duration::from_secs(4);
+/// Upper bound on a single search request's `k`, so an over-large request can't
+/// drive the HNSW `ef` budget into a multi-second scan while holding the read lock.
+const MAX_SEARCH_K: usize = 200;
 
 fn now_secs() -> u64 {
 	SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -248,6 +252,55 @@ fn rank_peers(peers: &[(String, Value)], k: usize) -> Vec<Value> {
 	out
 }
 
+fn default_k() -> usize { 10 }
+
+#[derive(serde::Deserialize)]
+struct SearchBody {
+	vec: Vec<f64>,
+	#[serde(default = "default_k")]
+	k: usize,
+}
+
+/// Peer endpoint: rank this daemon's graph against a *supplied* query vector.
+/// No embedding happens here — the hub already embedded once and passes the
+/// vector down, so N daemons cost one embed call total.
+async fn peer_search(State(g): State<Graph>, Json(body): Json<SearchBody>) -> Json<Value> {
+	let g = read_recovered(&g);
+	let k = body.k.min(MAX_SEARCH_K);
+
+	let mut hits = Vec::new();
+	for h in search_all_unlocked(&g, &body.vec, k) {
+		if let Some((e, kern)) = find_entity(&g, &h.entity_id) {
+			hits.push(json!({
+				"id": e.id,
+				"label": truncate(&e.text(), 60),
+				"kind": format!("{:?}", e.kind),
+				"kern": kern,
+				"heat": e.heat,
+				"conf": e.conf_mean(),
+				"score": h.score,
+			}));
+		}
+	}
+
+	let mut reasons = Vec::new();
+	for h in search_reasons_all_unlocked(&g, &body.vec, k) {
+		if let Some((r, kern)) = find_reason(&g, &h.reason_id) {
+			// id is the edge's target entity so a click anchors a real node,
+			// matching today's substring behavior (results used l.target).
+			reasons.push(json!({
+				"id": r.to,
+				"label": truncate(&r.text, 80),
+				"kind": format!("{:?}", r.kind),
+				"kern": kern,
+				"score": h.score,
+			}));
+		}
+	}
+
+	Json(json!({ "hits": hits, "reasons": reasons }))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -309,57 +362,6 @@ mod tests {
 		assert_eq!(out[0]["kern"], "A|k1");
 		assert_eq!(out[1]["id"], "B|e2");
 	}
-}
-
-fn default_k() -> usize { 10 }
-
-#[derive(serde::Deserialize)]
-struct SearchBody {
-    vec: Vec<f64>,
-    #[serde(default = "default_k")]
-    k: usize,
-}
-
-/// Peer endpoint: rank this daemon's graph against a *supplied* query vector.
-/// No embedding happens here — the hub already embedded once and passes the
-/// vector down, so N daemons cost one embed call total.
-async fn peer_search(State(g): State<Graph>, Json(body): Json<SearchBody>) -> Json<Value> {
-    use crate::base::search::{
-        find_entity, find_reason, search_all_unlocked, search_reasons_all_unlocked,
-    };
-    let g = read_recovered(&g);
-
-    let mut hits = Vec::new();
-    for h in search_all_unlocked(&g, &body.vec, body.k) {
-        if let Some((e, kern)) = find_entity(&g, &h.entity_id) {
-            hits.push(json!({
-                "id": e.id,
-                "label": truncate(&e.text(), 60),
-                "kind": format!("{:?}", e.kind),
-                "kern": kern,
-                "heat": e.heat,
-                "conf": e.conf_mean(),
-                "score": h.score,
-            }));
-        }
-    }
-
-    let mut reasons = Vec::new();
-    for h in search_reasons_all_unlocked(&g, &body.vec, body.k) {
-        if let Some((r, kern)) = find_reason(&g, &h.reason_id) {
-            // id is the edge's target entity so a click anchors a real node,
-            // matching today's substring behavior (results used l.target).
-            reasons.push(json!({
-                "id": r.to,
-                "label": truncate(&r.text, 80),
-                "kind": format!("{:?}", r.kind),
-                "kern": kern,
-                "score": h.score,
-            }));
-        }
-    }
-
-    Json(json!({ "hits": hits, "reasons": reasons }))
 }
 
 /// Snapshot the live graph as `{nodes, links, kerns}`. Nodes are entities
