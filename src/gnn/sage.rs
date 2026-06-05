@@ -1,5 +1,6 @@
 
 
+use crate::gnn::activation::Activation;
 use crate::gnn::backward::{
 	act_deriv_mul, l2_norm_backward, l2_normalize_rows, BackwardGraphLayer, GraphLayer,
 };
@@ -15,7 +16,7 @@ pub struct SAGELayer {
 	pub agg_func: AggregateFunc,
 	pub norm: Option<LayerNorm>,
 	pub drop: Option<Dropout>,
-	pub act_fn: Option<fn(f64) -> f64>,
+	pub act: Option<Activation>,
 	pub l2_norm: bool,
 	pub in_features: usize,
 	last_concats: Option<Tensor>,
@@ -29,7 +30,7 @@ impl SAGELayer {
 		in_features: usize,
 		out_features: usize,
 		agg: AggregateFunc,
-		act_fn: Option<fn(f64) -> f64>,
+		act: Option<Activation>,
 		l2_norm: bool,
 		layer_norm: bool,
 		drop_rate: f64,
@@ -47,7 +48,7 @@ impl SAGELayer {
 			} else {
 				None
 			},
-			act_fn,
+			act,
 			l2_norm,
 			in_features,
 			last_concats: None,
@@ -89,8 +90,8 @@ impl GraphLayer for SAGELayer {
 			output = nm.forward(&output);
 		}
 		self.last_pre_act = Some(output.clone());
-		if let Some(f) = self.act_fn {
-			output = output.apply(f);
+		if let Some(a) = self.act {
+			output = output.apply(|x| a.forward(x));
 		}
 		if self.l2_norm {
 			self.last_l2_in = Some(output.clone());
@@ -138,9 +139,9 @@ impl BackwardGraphLayer for SAGELayer {
 				grad = l2_norm_backward(l2_in, &grad);
 			}
 		}
-		if let Some(f) = self.act_fn {
+		if let Some(a) = self.act {
 			let pre_act = self.last_pre_act.as_ref().unwrap();
-			grad = act_deriv_mul(f, &grad, pre_act);
+			grad = act_deriv_mul(a, &grad, pre_act);
 		}
 		if let Some(ref mut nm) = self.norm {
 			grad = nm.backward(&grad);

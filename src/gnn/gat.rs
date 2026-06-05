@@ -1,5 +1,6 @@
 
 
+use crate::gnn::activation::Activation;
 use crate::gnn::backward::{act_deriv_mul, BackwardGraphLayer, GraphLayer};
 use crate::gnn::dropout::Dropout;
 use crate::gnn::graph::Graph;
@@ -17,7 +18,7 @@ pub struct GATLayer {
 	pub a: Vec<Tensor>,      // K attention vectors 1×(2*head_dim)
 	pub norm: Option<LayerNorm>,
 	pub drop: Option<Dropout>,
-	pub act_fn: Option<fn(f64) -> f64>,
+	pub act: Option<Activation>,
 	last_features: Option<Tensor>,
 	last_wh: Vec<Tensor>,
 	last_alpha: Vec<Vec<Vec<f64>>>, // [K][N][|nbrs|]
@@ -33,7 +34,7 @@ impl GATLayer {
 		head_dim: usize,
 		heads: usize,
 		concat: bool,
-		act_fn: Option<fn(f64) -> f64>,
+		act: Option<Activation>,
 		norm: bool,
 		drop_rate: f64,
 	) -> Self {
@@ -62,7 +63,7 @@ impl GATLayer {
 			} else {
 				None
 			},
-			act_fn,
+			act,
 			last_features: None,
 			last_wh: Vec::new(),
 			last_alpha: Vec::new(),
@@ -174,8 +175,8 @@ impl GraphLayer for GATLayer {
 			output = nm.forward(&output);
 		}
 		self.last_pre_act = Some(output.clone());
-		if let Some(f) = self.act_fn {
-			output = output.apply(f);
+		if let Some(a) = self.act {
+			output = output.apply(|x| a.forward(x));
 		}
 		if let Some(ref mut d) = self.drop {
 			output = d.forward(&output);
@@ -232,12 +233,12 @@ impl GATLayer {
 		if let Some(ref d) = self.drop {
 			grad = d.backward(&grad);
 		}
-		if let Some(f) = self.act_fn {
+		if let Some(a) = self.act {
 			let pre_act = self
 				.last_pre_act
 				.as_ref()
 				.ok_or(GnnError::MissingForwardState("gat::last_pre_act"))?;
-			grad = act_deriv_mul(f, &grad, pre_act);
+			grad = act_deriv_mul(a, &grad, pre_act);
 		}
 		if let Some(ref mut nm) = self.norm {
 			grad = nm.backward(&grad);

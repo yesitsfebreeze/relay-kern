@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::gnn::activation::relu;
+use crate::gnn::activation::Activation;
 use crate::gnn::backward::BackwardGraphLayer;
 use crate::gnn::gcn::GCNLayer;
 use crate::gnn::graph::Graph;
@@ -68,7 +68,8 @@ pub fn run_learned_propagation(
 		return Err("could not sample negative edges".into());
 	}
 
-	let l1: Box<dyn BackwardGraphLayer> = Box::new(GCNLayer::new(dim, hidden, Some(relu), true, 0.0));
+	let l1: Box<dyn BackwardGraphLayer> =
+		Box::new(GCNLayer::new(dim, hidden, Some(Activation::Relu), true, 0.0));
 	let l2: Box<dyn BackwardGraphLayer> = Box::new(GCNLayer::new(hidden, dim, None, false, 0.0));
 	let mut model = Model::new(vec![l1, l2], None);
 

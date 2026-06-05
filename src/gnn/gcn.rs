@@ -1,5 +1,6 @@
 
 
+use crate::gnn::activation::Activation;
 use crate::gnn::backward::{act_deriv_mul, BackwardGraphLayer, GraphLayer};
 use crate::gnn::dropout::Dropout;
 use crate::gnn::graph::Graph;
@@ -11,7 +12,7 @@ pub struct GCNLayer {
 	pub linear: LinearLayer,
 	pub norm: Option<LayerNorm>,
 	pub drop: Option<Dropout>,
-	pub act_fn: Option<fn(f64) -> f64>,
+	pub act: Option<Activation>,
 	last_norm_adj: Option<Tensor>,
 	last_pre_act: Option<Tensor>,
 }
@@ -20,12 +21,12 @@ impl GCNLayer {
 	pub fn new(
 		in_features: usize,
 		out_features: usize,
-		act_fn: Option<fn(f64) -> f64>,
+		act: Option<Activation>,
 		norm: bool,
 		drop_rate: f64,
 	) -> Self {
 		let mut rng = rand::rng();
-		Self::with_rng(in_features, out_features, act_fn, norm, drop_rate, &mut rng)
+		Self::with_rng(in_features, out_features, act, norm, drop_rate, &mut rng)
 	}
 
 	/// Construct a `GCNLayer` with deterministic weight init from a
@@ -34,7 +35,7 @@ impl GCNLayer {
 	pub fn with_rng<R: rand::Rng>(
 		in_features: usize,
 		out_features: usize,
-		act_fn: Option<fn(f64) -> f64>,
+		act: Option<Activation>,
 		norm: bool,
 		drop_rate: f64,
 		rng: &mut R,
@@ -51,7 +52,7 @@ impl GCNLayer {
 			} else {
 				None
 			},
-			act_fn,
+			act,
 			last_norm_adj: None,
 			last_pre_act: None,
 		}
@@ -69,8 +70,8 @@ impl GraphLayer for GCNLayer {
 			h = n.forward(&h);
 		}
 		self.last_pre_act = Some(h.clone());
-		if let Some(f) = self.act_fn {
-			h = h.apply(f);
+		if let Some(a) = self.act {
+			h = h.apply(|x| a.forward(x));
 		}
 		if let Some(ref mut d) = self.drop {
 			h = d.forward(&h);
@@ -107,9 +108,9 @@ impl BackwardGraphLayer for GCNLayer {
 		if let Some(ref d) = self.drop {
 			grad = d.backward(&grad);
 		}
-		if let Some(f) = self.act_fn {
+		if let Some(a) = self.act {
 			let pre_act = self.last_pre_act.as_ref().expect("backward before forward");
-			grad = act_deriv_mul(f, &grad, pre_act);
+			grad = act_deriv_mul(a, &grad, pre_act);
 		}
 		if let Some(ref mut n) = self.norm {
 			grad = n.backward(&grad);

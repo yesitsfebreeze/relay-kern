@@ -1,14 +1,16 @@
 
 
+use crate::gnn::activation::Activation;
 use crate::gnn::graph::Graph;
 use crate::gnn::tensor::Tensor;
 
-pub fn act_deriv_mul(act_fn: fn(f64) -> f64, d_out: &Tensor, pre_act: &Tensor) -> Tensor {
-	const EPS: f64 = 1e-5;
+/// Multiply an incoming gradient by the activation's analytic derivative,
+/// evaluated at the pre-activation values. Exact (no finite-difference bias at
+/// kinks) and half the activation evaluations of a central difference.
+pub fn act_deriv_mul(act: Activation, d_out: &Tensor, pre_act: &Tensor) -> Tensor {
 	let mut out = Tensor::zeros(d_out.rows, d_out.cols);
 	for (i, &x) in pre_act.data.iter().enumerate() {
-		let deriv = (act_fn(x + EPS) - act_fn(x - EPS)) / (2.0 * EPS);
-		out.data[i] = d_out.data[i] * deriv;
+		out.data[i] = d_out.data[i] * act.deriv(x);
 	}
 	out
 }
@@ -69,4 +71,44 @@ pub trait BackwardGraphLayer: GraphLayer {
 	fn param_grads(&self) -> Vec<&Tensor>;
 	fn param_grads_mut(&mut self) -> Vec<&mut Tensor>;
 	fn zero_grads(&mut self);
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn relu_backward_is_exact_no_kink_bias() {
+		// Pre-activations straddling zero, incoming grad all 1.0. With the old
+		// central-difference, x=+/-1e-6 leaked ~0.5; the analytic derivative
+		// gates exactly: 0 where x<=0, pass-through where x>0.
+		let pre = Tensor {
+			data: vec![-2.0, -1e-6, 0.0, 1e-6, 3.0],
+			rows: 1,
+			cols: 5,
+		};
+		let d_out = Tensor {
+			data: vec![1.0; 5],
+			rows: 1,
+			cols: 5,
+		};
+		let g = act_deriv_mul(Activation::Relu, &d_out, &pre);
+		assert_eq!(g.data, vec![0.0, 0.0, 0.0, 1.0, 1.0]);
+	}
+
+	#[test]
+	fn backward_scales_incoming_gradient_by_deriv() {
+		let pre = Tensor {
+			data: vec![1.0, -1.0],
+			rows: 1,
+			cols: 2,
+		};
+		let d_out = Tensor {
+			data: vec![0.5, 0.5],
+			rows: 1,
+			cols: 2,
+		};
+		let g = act_deriv_mul(Activation::LeakyRelu(0.2), &d_out, &pre);
+		assert_eq!(g.data, vec![0.5, 0.1]); // 0.5*1, 0.5*0.2
+	}
 }

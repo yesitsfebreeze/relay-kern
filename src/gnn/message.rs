@@ -1,5 +1,6 @@
 
 
+use crate::gnn::activation::Activation;
 use crate::gnn::tensor::Tensor;
 
 pub type AggregateFunc = fn(&[Tensor]) -> Option<Tensor>;
@@ -42,7 +43,7 @@ pub fn max_aggregate(messages: &[Tensor]) -> Option<Tensor> {
 pub struct MessagePassingLayer {
 	pub linear: crate::gnn::layer::LinearLayer,
 	pub agg_func: AggregateFunc,
-	pub act_fn: Option<fn(f64) -> f64>,
+	pub act: Option<Activation>,
 	pub in_features: usize,
 }
 
@@ -51,12 +52,12 @@ impl MessagePassingLayer {
 		in_features: usize,
 		out_features: usize,
 		agg: AggregateFunc,
-		act_fn: Option<fn(f64) -> f64>,
+		act: Option<Activation>,
 	) -> Self {
 		Self {
 			linear: crate::gnn::layer::LinearLayer::new(2 * in_features, out_features),
 			agg_func: agg,
-			act_fn,
+			act,
 			in_features,
 		}
 	}
@@ -92,8 +93,8 @@ impl MessagePassingLayer {
 
 			use crate::gnn::layer::Layer;
 			let mut out = self.linear.forward(&concat);
-			if let Some(f) = self.act_fn {
-				out = out.apply(f);
+			if let Some(a) = self.act {
+				out = out.apply(|x| a.forward(x));
 			}
 			output.set_row(i, &out);
 		}
