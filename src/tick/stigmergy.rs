@@ -83,10 +83,12 @@ pub fn run_gc(
 		remove_entity(&mut g, kern_id, id);
 	}
 
-	// Bound cold-store growth: dedup to the latest entry per id once per sweep.
+	// Bound cold-store growth: size-gated compaction (dedup latest-per-id +
+	// evict oldest past the cap). maybe_compact skips the full O(total) rewrite
+	// until the file grows past a threshold, so a few-victim sweep is cheap.
 	if let Some(dir) = cold_dir {
 		if !victims.is_empty() {
-			crate::base::cold::compact(dir);
+			crate::base::cold::maybe_compact(dir);
 		}
 	}
 }

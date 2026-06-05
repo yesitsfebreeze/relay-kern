@@ -15,6 +15,19 @@ pub const QBST_CAP: f64 = 0.1;
 
 pub const DEFAULT_DEDUP_THRESHOLD: f64 = 0.92;
 
+/// Cold-store compaction is skipped until `cold.jsonl` grows past this many
+/// bytes. Compaction rewrites the whole file (O(total)), so gating on size
+/// stops steady-state GC from rewriting the entire store every sweep for a
+/// handful of victims — and because compaction shrinks the file, it
+/// self-rate-limits. Reads stay correct meanwhile (latest-line-wins is applied
+/// in memory). 256 KiB.
+pub const COLD_COMPACT_MIN_BYTES: u64 = 256 * 1024;
+
+/// Absolute cap on entities retained in the cold store. Compaction keeps the
+/// newest `COLD_MAX_ENTRIES` by creation time and drops the oldest, so the
+/// cold tier cannot grow without bound over the daemon's lifetime.
+pub const COLD_MAX_ENTRIES: usize = 50_000;
+
 /// HNSW `ef` (search beam width) used by ingest dedup's nearest-neighbour
 /// probe. Dedup asks for the single closest entity (k=1); with `ef=1` the
 /// search is greedy single-path and routinely misses the true nearest

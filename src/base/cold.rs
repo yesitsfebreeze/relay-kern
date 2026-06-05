@@ -40,12 +40,49 @@ pub fn spill(cold_dir: &Path, entity: &Entity) {
 	}
 }
 
+/// Compact the cold store only if it has grown past
+/// [`COLD_COMPACT_MIN_BYTES`]. Compaction rewrites the whole file (O(total)),
+/// so this gate keeps steady-state GC from rewriting the entire store every
+/// sweep when only a few victims were spilled; because compaction shrinks the
+/// file, it self-rate-limits. Reads remain correct meanwhile (latest-line-wins
+/// is resolved in memory by [`load_all`]). Best-effort.
+pub fn maybe_compact(cold_dir: &Path) {
+	maybe_compact_with(
+		cold_dir,
+		crate::base::constants::COLD_COMPACT_MIN_BYTES,
+		crate::base::constants::COLD_MAX_ENTRIES,
+	);
+}
+
+fn maybe_compact_with(cold_dir: &Path, min_bytes: u64, max_entries: usize) {
+	let size = std::fs::metadata(store_path(cold_dir))
+		.map(|m| m.len())
+		.unwrap_or(0);
+	if size < min_bytes {
+		return;
+	}
+	compact_capped(cold_dir, max_entries);
+}
+
 /// Rewrite the cold store keeping only the latest entry per id, bounding
 /// file growth. Best-effort; a failure leaves the existing file intact.
 pub fn compact(cold_dir: &Path) {
-	let entities = load_all(cold_dir);
+	compact_capped(cold_dir, crate::base::constants::COLD_MAX_ENTRIES);
+}
+
+/// Rewrite the cold store keeping only the latest entry per id, then cap the
+/// tier at `max_entries`, dropping the oldest (by `created_at`; entries with no
+/// timestamp sort oldest and are evicted first). Bounds cold-tier growth over
+/// the daemon's lifetime. Best-effort; failure leaves the file intact.
+fn compact_capped(cold_dir: &Path, max_entries: usize) {
+	let mut entities = load_all(cold_dir);
 	if entities.is_empty() {
 		return;
+	}
+	if entities.len() > max_entries {
+		// Newest first (None sorts last = oldest), then keep the head.
+		entities.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+		entities.truncate(max_entries);
 	}
 	let tmp = cold_dir.join("cold.jsonl.tmp");
 	let mut buf = String::new();
@@ -223,6 +260,53 @@ mod tests {
 			spill(dir.path(), &e);
 		}
 		assert_eq!(search(dir.path(), &[1.0, 0.0], 2).len(), 2);
+	}
+
+	fn count_lines(dir: &Path) -> usize {
+		std::fs::read_to_string(store_path(dir))
+			.map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
+			.unwrap_or(0)
+	}
+
+	#[test]
+	fn maybe_compact_skips_below_size_threshold() {
+		let dir = tempfile::tempdir().unwrap();
+		// Two lines for the same id: a real compaction would dedup to 1.
+		spill(dir.path(), &mk_entity("x", "v1", 1.0, EntityKind::Claim));
+		spill(dir.path(), &mk_entity("x", "v2", 2.0, EntityKind::Claim));
+		assert_eq!(count_lines(dir.path()), 2);
+		// Huge min_bytes → below threshold → no rewrite (duplicate line kept).
+		maybe_compact_with(dir.path(), u64::MAX, 50_000);
+		assert_eq!(count_lines(dir.path()), 2, "no rewrite below threshold");
+		// Reads still resolve latest-wins despite the un-compacted duplicate.
+		assert_eq!(get(dir.path(), "x").unwrap().heat, 2.0);
+	}
+
+	#[test]
+	fn maybe_compact_runs_above_threshold() {
+		let dir = tempfile::tempdir().unwrap();
+		spill(dir.path(), &mk_entity("x", "v1", 1.0, EntityKind::Claim));
+		spill(dir.path(), &mk_entity("x", "v2", 2.0, EntityKind::Claim));
+		// min_bytes 0 → always compacts → dedups to 1 line.
+		maybe_compact_with(dir.path(), 0, 50_000);
+		assert_eq!(count_lines(dir.path()), 1, "compacted above threshold");
+	}
+
+	#[test]
+	fn compact_caps_tier_dropping_oldest() {
+		use std::time::{Duration, UNIX_EPOCH};
+		let dir = tempfile::tempdir().unwrap();
+		// Three distinct ids with increasing created_at; cap=2 keeps newest 2.
+		for (i, id) in ["old", "mid", "new"].iter().enumerate() {
+			let mut e = mk_entity(id, id, 1.0, EntityKind::Claim);
+			e.created_at = Some(UNIX_EPOCH + Duration::from_secs(100 * (i as u64 + 1)));
+			spill(dir.path(), &e);
+		}
+		maybe_compact_with(dir.path(), 0, 2);
+		assert_eq!(count_lines(dir.path()), 2, "tier capped at 2");
+		assert!(get(dir.path(), "new").is_some(), "newest kept");
+		assert!(get(dir.path(), "mid").is_some(), "second-newest kept");
+		assert!(get(dir.path(), "old").is_none(), "oldest evicted");
 	}
 
 	#[test]
