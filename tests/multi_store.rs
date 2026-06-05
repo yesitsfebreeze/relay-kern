@@ -10,7 +10,7 @@ async fn registry_idempotent_and_isolated() {
     let dir_b = tempfile::tempdir().unwrap();
 
     let cfg = Config::default();
-    let llm = Client::new("", "", "", "", "", "");
+    let llm = Client::new("", "", "", "", "", "", "", "", "");
 
     let reg = Registry::new();
 
