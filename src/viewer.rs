@@ -31,9 +31,10 @@ use std::convert::Infallible;
 use serde_json::{json, Value};
 
 use crate::base::graph::GraphGnn;
-use crate::base::locks::read_recovered;
+use crate::base::locks::{read_recovered, write_recovered};
 use crate::base::util::truncate;
 use crate::config::RetrievalConfig;
+use crate::tick::queue::{task, TaskKind};
 
 type Graph = Arc<RwLock<GraphGnn>>;
 
@@ -41,6 +42,7 @@ type Graph = Arc<RwLock<GraphGnn>>;
 struct LocalState {
 	graph: Graph,
 	retrieval: RetrievalConfig,
+	queue: std::sync::Arc<crate::tick::queue::Queue>,
 }
 
 /// Heartbeat cadence and the staleness window for treating a registry entry as
@@ -70,14 +72,15 @@ fn registry_file() -> PathBuf {
 
 /// Run the viewer: start this daemon's local graph server, register it, and
 /// contend for the aggregator role. Never returns under normal operation.
-pub async fn run(graph: Graph, llm: crate::llm::Client, retrieval: RetrievalConfig, agg_addr: &str) -> std::io::Result<()> {
+pub async fn run(graph: Graph, llm: crate::llm::Client, retrieval: RetrievalConfig, queue: std::sync::Arc<crate::tick::queue::Queue>, agg_addr: &str) -> std::io::Result<()> {
 	// 1. Local graph server on an ephemeral loopback port (this daemon's own data).
 	let local = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
 	let local_addr = local.local_addr()?.to_string();
-	let local_state = LocalState { graph: graph.clone(), retrieval: retrieval.clone() };
+	let local_state = LocalState { graph: graph.clone(), retrieval: retrieval.clone(), queue: queue.clone() };
 	let local_app = Router::new()
 		.route("/graph", get(graph_json))
 		.route("/ask_retrieve", post(ask_retrieve))
+		.route("/edit", post(edit))
 		.with_state(local_state);
 	tokio::spawn(async move {
 		if let Err(e) = axum::serve(local, local_app).await {
@@ -104,6 +107,7 @@ pub async fn run(graph: Graph, llm: crate::llm::Client, retrieval: RetrievalConf
 					.route("/", get(index))
 					.route("/graph", get(aggregate))
 					.route("/ask", post(ask))
+					.route("/edit", post(hub_edit))
 					.with_state(hub);
 				if let Err(e) = axum::serve(listener, app).await {
 					tracing::warn!(target: "kern.viewer", error = %e, "aggregator hub exited; will retry");
@@ -507,6 +511,64 @@ mod tests {
 		assert_eq!(out[0]["id"], "A|e9");
 		assert_eq!(out[0]["kern"], "A|k1");
 		assert_eq!(out[1]["id"], "B|e2");
+	}
+}
+
+#[derive(serde::Deserialize)]
+struct EditBody {
+	id: String,
+	text: String,
+	#[serde(default)]
+	kind: String,
+}
+
+/// Peer endpoint: edit an entity or reason by id, mark dirty, enqueue reembed + persist.
+async fn edit(State(st): State<LocalState>, Json(body): Json<EditBody>) -> Json<Value> {
+	let is_reason = body.kind == "reason";
+	let kern_id = {
+		let g = read_recovered(&st.graph);
+		if is_reason {
+			g.kern_of_reason(&body.id).map(|s| s.to_string())
+		} else {
+			g.kern_of_entity(&body.id).map(|s| s.to_string())
+		}
+	};
+	let Some(kern_id) = kern_id else {
+		return Json(json!({ "ok": false, "error": "not found" }));
+	};
+	{
+		let mut g = write_recovered(&st.graph);
+		if let Some(k) = g.get_mut(&kern_id) {
+			if is_reason {
+				if let Some(r) = k.reasons.get_mut(&body.id) {
+					r.set_text(body.text.clone());
+				}
+			} else if let Some(e) = k.entities.get_mut(&body.id) {
+				e.set_text(body.text.clone());
+			}
+		}
+	}
+	st.queue.enqueue(task(TaskKind::Reembed, &kern_id));
+	st.queue.enqueue(task(TaskKind::Persist, &kern_id));
+	Json(json!({ "ok": true }))
+}
+
+/// Hub endpoint: forward an edit to the peer that owns the namespaced id.
+async fn hub_edit(State(st): State<HubState>, Json(mut body): Json<Value>) -> Json<Value> {
+	let id = body.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+	let Some((addr, real)) = id.split_once('|') else {
+		return Json(json!({ "ok": false, "error": "bad id" }));
+	};
+	if let Some(o) = body.as_object_mut() {
+		o.insert("id".into(), json!(real));
+	}
+	let url = format!("http://{addr}/edit");
+	match st.client.post(&url).json(&body).send().await {
+		Ok(r) => match r.json::<Value>().await {
+			Ok(v) => Json(v),
+			Err(_) => Json(json!({ "ok": false, "error": "peer decode" })),
+		},
+		Err(_) => Json(json!({ "ok": false, "error": "peer unreachable" })),
 	}
 }
 

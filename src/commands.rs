@@ -215,6 +215,7 @@ pub(crate) fn resolve<'a>(arg: &'a Option<String>, fallback: &'a str) -> &'a str
 	arg.as_deref().unwrap_or(fallback)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_llm(
 	embed_url: &str,
 	embed_model: &str,
@@ -222,11 +223,17 @@ pub(crate) fn build_llm(
 	reason_url: &str,
 	reason_model: &str,
 	reason_key: &str,
+	answer_url: &str,
+	answer_model: &str,
+	answer_key: &str,
 ) -> crate::llm::Client {
 	crate::llm::Client::new(
 		reason_url,
 		reason_model,
 		reason_key,
+		answer_url,
+		answer_model,
+		answer_key,
 		embed_url,
 		embed_model,
 		embed_key,
@@ -458,6 +465,9 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		&reason_url,
 		&reason_model,
 		cfg.reason_key(),
+		cfg.answer_url(),
+		&cfg.answer.model,
+		cfg.answer_key(),
 	);
 
 	let llm_fn: Option<crate::ingest::LlmFunc> = if !reason_url.is_empty() {
@@ -525,8 +535,9 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		let vaddr = cfg.serve.viewer.clone();
 		let viewer_llm = llm_client.clone();
 		let viewer_retrieval = cfg.retrieval.clone();
+		let viewer_q = q.clone();
 		tokio::spawn(async move {
-			if let Err(e) = crate::viewer::run(vg, viewer_llm, viewer_retrieval, &vaddr).await {
+			if let Err(e) = crate::viewer::run(vg, viewer_llm, viewer_retrieval, viewer_q, &vaddr).await {
 				tracing::warn!(target: "kern.viewer", error = %e, "graph viewer failed to start");
 			}
 		});
