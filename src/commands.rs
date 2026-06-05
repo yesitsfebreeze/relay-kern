@@ -476,11 +476,12 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		None
 	};
 
-	// Keep the embedding model resident. Ollama unloads it after ~5 min idle,
-	// and the OpenAI-compat /v1 endpoint kern uses ignores `keep_alive`, so the
-	// next query pays a multi-second cold reload (~7s for qwen3-embedding here).
-	// A tiny embed every 4 min re-touches the model so retrieval stays warm
-	// (~0.3s). Cheap and self-contained — no dependency on OLLAMA_KEEP_ALIVE.
+	// Keep the embedding AND answer models resident. Ollama unloads after ~5 min
+	// idle, and the OpenAI-compat /v1 endpoint kern uses ignores `keep_alive`, so
+	// the next call pays a multi-second cold reload (~7s for qwen3-embedding, more
+	// for the 4b answer model). A tiny embed + a 1-token answer ping every 4 min
+	// re-touches both so retrieval and the user-facing /ask stay warm. Cheap and
+	// self-contained — no dependency on OLLAMA_KEEP_ALIVE.
 	{
 		let warm = llm_client.clone();
 		tokio::spawn(async move {
@@ -488,6 +489,7 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 			loop {
 				tick.tick().await;
 				let _ = warm.embed("kern-keepalive").await;
+				let _ = warm.warm_answer().await;
 			}
 		});
 	}

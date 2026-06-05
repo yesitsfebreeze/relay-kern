@@ -239,21 +239,27 @@ impl Client {
 	) -> impl futures_core::Stream<Item = Result<String, LlmError>> + Send {
 		let client = self.clone();
 		async_stream::stream! {
-			let url = format!("{}/v1/chat/completions", client.inner.answer_url);
+			// Ollama's NATIVE /api/chat, not the OpenAI-compat /v1: it is the only
+			// endpoint that honors `options.num_ctx` and `keep_alive`, both of which
+			// the answer path needs to stay GPU-resident (see ANSWER_NUM_CTX). The
+			// trade is that the answer endpoint must be Ollama — by design: [answer]
+			// is the local small-model glue path. Reason/embed stay on /v1.
+			let url = format!("{}/api/chat", client.inner.answer_url);
 			let msgs: Vec<serde_json::Value> = messages
 				.iter()
 				.map(|(r, c)| serde_json::json!({"role": r, "content": c}))
 				.collect();
-			// `reasoning_effort: none` disables the thinking phase. The answer model
-			// (qwen3.5) thinks by default, emitting hidden reasoning tokens before
-			// the first visible token — pure latency for a path that only glues
-			// already-retrieved graph nodes into prose. Ollama ignores unknown keys,
-			// so this is a no-op for non-reasoning models.
+			// `think: false` disables the thinking phase. The answer model (qwen3.5)
+			// thinks by default, emitting hidden reasoning tokens before the first
+			// visible one — pure latency for a path that only glues already-retrieved
+			// graph nodes into prose. Ignored by non-reasoning models.
 			let body = serde_json::json!({
 				"model": client.inner.answer_model,
 				"messages": msgs,
 				"stream": true,
-				"reasoning_effort": "none",
+				"think": false,
+				"keep_alive": ANSWER_KEEP_ALIVE,
+				"options": { "num_ctx": ANSWER_NUM_CTX },
 			});
 			// Override the client's 120s TOTAL timeout: a streamed generation can
 			// take far longer to finish than 120s (big RAG prompt + CPU inference),
@@ -289,14 +295,46 @@ impl Client {
 				while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
 					let raw: Vec<u8> = buf.drain(..=pos).collect();
 					let line = String::from_utf8_lossy(&raw);
-					match parse_sse_line(line.trim_end()) {
-						Some(SseDelta::Done) => return,
-						Some(SseDelta::Token(t)) if !t.is_empty() => yield Ok(t),
+					match parse_chat_line(line.trim_end()) {
+						Some(ChatDelta::Done) => return,
+						Some(ChatDelta::Token(t)) if !t.is_empty() => yield Ok(t),
 						_ => {}
 					}
 				}
 			}
 		}
+	}
+
+	/// Touch the answer model so Ollama keeps it GPU-resident. Mirrors the embed
+	/// keep-alive: `/ask` is user-facing and a cold reload of qwen3.5:4b costs
+	/// multiple seconds before the first token. A 1-token `/api/chat` with the
+	/// same `num_ctx` and `keep_alive` as the real stream holds the exact runner
+	/// instance, so the next `/ask` reuses it instead of reloading. Errors are
+	/// the caller's to ignore — a missed warm just means one slow request.
+	pub async fn warm_answer(&self) -> Result<(), LlmError> {
+		let url = format!("{}/api/chat", self.inner.answer_url);
+		let body = serde_json::json!({
+			"model": self.inner.answer_model,
+			"messages": [{"role": "user", "content": "warm"}],
+			"stream": false,
+			"think": false,
+			"keep_alive": ANSWER_KEEP_ALIVE,
+			"options": { "num_ctx": ANSWER_NUM_CTX, "num_predict": 1 },
+		});
+		let resp = self
+			.inner
+			.http
+			.post(&url)
+			.headers(self.inner.answer_headers.clone())
+			.json(&body)
+			.send()
+			.await?;
+		let status = resp.status().as_u16();
+		if status >= 400 {
+			let body = resp.text().await.unwrap_or_default();
+			return Err(LlmError::Api { status, body });
+		}
+		Ok(())
 	}
 
 	pub fn complete_func(&self) -> impl Fn(&str) -> String + Send + Sync + 'static {
@@ -377,29 +415,41 @@ struct ChatChoiceMessage {
 	content: String,
 }
 
+/// Context window for the answer model's `/api/chat` load. The `/ask` path glues
+/// already-retrieved graph nodes into a short paragraph — it never needs a large
+/// window, and Ollama's default 32k allocates a KV cache big enough to spill a 4b
+/// model off an 8 GB GPU onto CPU (~2x slower, and it evicts the embedder). 8192
+/// keeps qwen3.5:4b fully GPU-resident alongside the embedder.
+const ANSWER_NUM_CTX: u64 = 8192;
+
+/// Keep the answer model resident between requests. `/v1` ignores `keep_alive`;
+/// `/api/chat` honors it. Paired with the ~4-min warm ping this holds the model
+/// so a user `/ask` never pays a cold reload.
+const ANSWER_KEEP_ALIVE: &str = "10m";
+
 #[derive(Debug, PartialEq)]
-enum SseDelta {
+enum ChatDelta {
 	Token(String),
 	Done,
 }
 
-/// Parse one SSE line from an OpenAI/ollama streaming chat response.
-/// `data: [DONE]` → `Done`; `data: {json}` → `Token(delta.content)`; anything
-/// else (blank lines, comments, non-`data:` fields) → `None`.
-fn parse_sse_line(line: &str) -> Option<SseDelta> {
-	let rest = line.strip_prefix("data:")?.trim();
-	if rest == "[DONE]" {
-		return Some(SseDelta::Done);
+/// Parse one line of an Ollama `/api/chat` streaming response (NDJSON). Each line
+/// is a JSON object `{"message":{"content":"…"},"done":bool}`. `done:true` →
+/// `Done`; otherwise the message content → `Token`. Blank lines / parse failures
+/// → `None`.
+fn parse_chat_line(line: &str) -> Option<ChatDelta> {
+	if line.is_empty() {
+		return None;
 	}
-	let v: Value = serde_json::from_str(rest).ok()?;
+	let v: Value = serde_json::from_str(line).ok()?;
+	if v.get("done").and_then(Value::as_bool).unwrap_or(false) {
+		return Some(ChatDelta::Done);
+	}
 	let content = v
-		.get("choices")
-		.and_then(|c| c.as_array())
-		.and_then(|a| a.first())
-		.and_then(|c| c.get("delta"))
-		.and_then(|d| d.get("content"))
+		.get("message")
+		.and_then(|m| m.get("content"))
 		.and_then(Value::as_str)?;
-	Some(SseDelta::Token(content.to_string()))
+	Some(ChatDelta::Token(content.to_string()))
 }
 
 #[cfg(test)]
@@ -407,18 +457,18 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn sse_line_yields_token_then_done() {
+	fn chat_line_yields_token_then_done() {
 		assert_eq!(
-			parse_sse_line(r#"data: {"choices":[{"delta":{"content":"He"}}]}"#),
-			Some(SseDelta::Token("He".to_string()))
+			parse_chat_line(r#"{"message":{"role":"assistant","content":"He"},"done":false}"#),
+			Some(ChatDelta::Token("He".to_string()))
 		);
-		assert_eq!(parse_sse_line("data: [DONE]"), Some(SseDelta::Done));
-		assert_eq!(parse_sse_line(""), None);
-		assert_eq!(parse_sse_line(": keep-alive"), None);
 		assert_eq!(
-			parse_sse_line(r#"data: {"choices":[{"delta":{}}]}"#),
-			None
+			parse_chat_line(r#"{"message":{"content":""},"done":true,"done_reason":"stop"}"#),
+			Some(ChatDelta::Done)
 		);
+		assert_eq!(parse_chat_line(""), None);
+		assert_eq!(parse_chat_line("not json"), None);
+		assert_eq!(parse_chat_line(r#"{"message":{},"done":false}"#), None);
 	}
 
 	#[test]
