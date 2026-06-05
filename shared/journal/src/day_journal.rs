@@ -63,7 +63,7 @@ pub struct DayJournal {
 
 impl DayJournal {
 	pub fn open(project_root: &Path, history: Arc<dyn HistorySink>) -> io::Result<Self> {
-		let dir = project_root.join(".relay").join("journal");
+		let dir = project_root.join(".kern").join("journal");
 		fs::create_dir_all(&dir)?;
 		let path = dir.join("today.jsonl");
 

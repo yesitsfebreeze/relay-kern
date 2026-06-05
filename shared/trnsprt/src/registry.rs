@@ -73,7 +73,7 @@ self.servers.insert(id, server);
 		transport: Box<dyn crate::transport::Transport>,
 	) -> Result<&LiveServer, McpError> {
 		let mut client = Client::new(transport);
-		client.initialize("relay", env!("CARGO_PKG_VERSION"))?;
+		client.initialize("kern", env!("CARGO_PKG_VERSION"))?;
 		let tools = client.list_tools()?;
 		match self.servers.entry(id) {
 			Entry::Vacant(e) => Ok(e.insert(LiveServer { client, tools })),

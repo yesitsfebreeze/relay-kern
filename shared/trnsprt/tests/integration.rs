@@ -10,7 +10,7 @@ fn handshake_sends_initialize_and_initialized_notification() {
 	let (transport, wire) = new_pipe();
 	let mut client = Client::new(Box::new(transport));
 	wire.push_reply(&reply_result(1, json!({ "protocolVersion": PROTOCOL_VERSION })));
-	let result = client.initialize("relay", "test").expect("initialize");
+	let result = client.initialize("kern", "test").expect("initialize");
 	assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
 	let frames = wire.drain_frames();
 	assert_eq!(frames.len(), 2, "init request + initialized notification");
@@ -122,7 +122,7 @@ fn registry_reports_unknown_server() {
 #[test]
 fn inproc_transport_roundtrips_handshake_and_tools_list() {
 	let mut client = Client::new(Box::new(InProcTransport::new(Box::new(AdderServer))));
-	let result = client.initialize("relay", "test").expect("initialize");
+	let result = client.initialize("kern", "test").expect("initialize");
 	assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
 	let tools = client.list_tools().expect("list_tools");
 	assert_eq!(tools.len(), 1);
@@ -132,7 +132,7 @@ fn inproc_transport_roundtrips_handshake_and_tools_list() {
 #[test]
 fn inproc_transport_dispatches_tools_call() {
 	let mut client = Client::new(Box::new(InProcTransport::new(Box::new(AdderServer))));
-	client.initialize("relay", "test").expect("initialize");
+	client.initialize("kern", "test").expect("initialize");
 	let out = client
 		.call_tool("add", &json!({ "a": 2, "b": 40 }))
 		.expect("call_tool");
@@ -143,7 +143,7 @@ fn inproc_transport_dispatches_tools_call() {
 #[test]
 fn inproc_transport_surfaces_tool_error_as_rpc() {
 	let mut client = Client::new(Box::new(InProcTransport::new(Box::new(AdderServer))));
-	client.initialize("relay", "test").expect("initialize");
+	client.initialize("kern", "test").expect("initialize");
 	let err = client
 		.call_tool("nope", &json!({}))
 		.expect_err("unknown tool");
@@ -168,7 +168,7 @@ fn registry_register_inproc_routes_call_tool() {
 #[test]
 fn inproc_transport_call_latency_under_ceiling() {
 	let mut client = Client::new(Box::new(InProcTransport::new(Box::new(AdderServer))));
-	client.initialize("relay", "test").expect("initialize");
+	client.initialize("kern", "test").expect("initialize");
 	let _ = client.call_tool("add", &json!({ "a": 0, "b": 0 })).unwrap();
 	let iters = 100;
 	let start = std::time::Instant::now();

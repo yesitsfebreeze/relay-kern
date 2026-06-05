@@ -34,7 +34,7 @@ pub struct History {
 
 impl History {
 	pub fn open(project_root: &Path) -> rusqlite::Result<Self> {
-		let dir = project_root.join(".relay").join("journal");
+		let dir = project_root.join(".kern").join("journal");
 		if let Err(e) = std::fs::create_dir_all(&dir) {
 			return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(e)));
 		}

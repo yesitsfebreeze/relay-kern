@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-/// Composite ignore matcher: per-root `.gitignore` + `.relayignore`.
+/// Composite ignore matcher: per-root `.gitignore` + `.kernignore`.
 ///
 /// Reuses the `ignore` crate (already a dep of `shared/search`) so we don't
 /// duplicate gitignore semantics. Matchers are evaluated per-root: an event
@@ -15,11 +15,11 @@ pub struct IgnoreRules {
 struct RootRules {
 	root: PathBuf,
 	gitignore: Option<Gitignore>,
-	relayignore: Option<Gitignore>,
+	kernignore: Option<Gitignore>,
 }
 
 impl IgnoreRules {
-	/// Build matchers by reading `<root>/.gitignore` and `<root>/.relayignore`
+	/// Build matchers by reading `<root>/.gitignore` and `<root>/.kernignore`
 	/// for every root. Missing files are silently skipped (no rules).
 	pub fn from_roots(roots: &[PathBuf]) -> Self {
 		let per_root = roots
@@ -27,8 +27,8 @@ impl IgnoreRules {
 			.map(|r| {
 				let root = r.clone();
 				let gitignore = build(&root, ".gitignore");
-				let relayignore = build(&root, ".relayignore");
-				RootRules { root, gitignore, relayignore }
+				let kernignore = build(&root, ".kernignore");
+				RootRules { root, gitignore, kernignore }
 			})
 			.collect();
 		Self { per_root }
@@ -53,7 +53,7 @@ impl IgnoreRules {
 					return true;
 				}
 			}
-			if let Some(g) = &rules.relayignore {
+			if let Some(g) = &rules.kernignore {
 				if g.matched(rel, false).is_ignore() {
 					return true;
 				}

@@ -1,10 +1,10 @@
 //! Filesystem watcher + ingest pipeline.
 //!
-//! Slice E of the Relay Search TUI plan. Wraps `notify` with:
+//! Filesystem watcher. Wraps `notify` with:
 //!
 //! * cross-platform recommended-watcher mode,
 //! * 50 ms per-path debounce (drops intermediates),
-//! * `.gitignore` + `.relayignore` honouring via the `ignore` crate
+//! * `.gitignore` + `.kernignore` honouring via the `ignore` crate
 //!   (reused from `shared/search`),
 //! * an [`IngestPipeline`] that reads file contents (≤1 MB) and forwards
 //!   `IngestRecord`s to a downstream [`IngestSink`] (kern wires its MCP

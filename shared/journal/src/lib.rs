@@ -18,7 +18,7 @@ pub use tracing_layer::{FieldRecorder, JournalTracingLayer};
 
 pub use day_journal::{DayJournal, HistorySink, NullHistorySink};
 
-/// Open the workspace-default journal: `<cwd>/.relay/journal/today.jsonl`
+/// Open the workspace-default journal: `<cwd>/.kern/journal/today.jsonl`
 /// with a `NullHistorySink` (no warm SQLite store). Use this from any
 /// binary that wants to emit cross-process events into the shared file.
 pub fn open_default() -> std::io::Result<DayJournal> {
@@ -32,7 +32,7 @@ static GLOBAL: OnceLock<DayJournal> = OnceLock::new();
 
 /// Lazily open and return the process-global journal handle. Subsequent
 /// calls reuse the same `DayJournal`. Returns `None` if open failed
-/// (e.g. cwd has no `.relay`); callers should treat journaling as best-
+/// (e.g. cwd has no `.kern`); callers should treat journaling as best-
 /// effort and silently no-op on failure.
 pub fn global() -> Option<&'static DayJournal> {
 	if let Some(j) = GLOBAL.get() {

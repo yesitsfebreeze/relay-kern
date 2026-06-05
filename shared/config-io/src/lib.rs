@@ -1,6 +1,6 @@
 // Generic TOML load/save/layer for per-binary configs.
-// User scope: <XDG_CONFIG>/relay/<bin>.toml
-// Project scope: <cwd>/.relay/<bin>.toml
+// User scope: <XDG_CONFIG>/kern/<bin>.toml
+// Project scope: <cwd>/.kern/<bin>.toml
 // Section-level merge: project TOML overrides whole sections; missing
 // sections fall through to user, then defaults.
 
@@ -22,11 +22,11 @@ pub enum Error {
 }
 
 pub fn user_dir() -> Result<PathBuf, Error> {
-	dirs::config_dir().ok_or(Error::NoConfigDir).map(|p| p.join("relay"))
+	dirs::config_dir().ok_or(Error::NoConfigDir).map(|p| p.join("kern"))
 }
 
 pub fn project_dir(cwd: &Path) -> PathBuf {
-	cwd.join(".relay")
+	cwd.join(".kern")
 }
 
 pub fn load<T: DeserializeOwned + Default>(path: &Path) -> Result<T, Error> {
@@ -87,7 +87,7 @@ mod tests {
 	/// Regression: a document whose first line is a `[section]` header must
 	/// parse as a table, not be misread as an array literal. Before the fix,
 	/// `read_value` used `parse::<toml::Value>()` which failed on any real
-	/// config file (every project `.relay/*.toml`), silently disabling
+	/// config file (every project `.kern/*.toml`), silently disabling
 	/// project-scope config.
 	#[test]
 	fn read_value_parses_leading_section_header() {
