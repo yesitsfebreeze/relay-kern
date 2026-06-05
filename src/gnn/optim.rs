@@ -102,6 +102,10 @@ impl Optimizer for Adam {
 		}
 		self.step_count += 1;
 		let t = self.step_count as f64;
+		// Bias-correction denominators are constant for the whole step; compute
+		// them once instead of re-running `powf` for every parameter element.
+		let bias_c1 = 1.0 - self.beta1.powf(t);
+		let bias_c2 = 1.0 - self.beta2.powf(t);
 
 		for (i, (param, grad)) in params.iter_mut().zip(grads.iter()).enumerate() {
 			for j in 0..param.data.len() {
@@ -109,8 +113,8 @@ impl Optimizer for Adam {
 				self.m[i].data[j] = self.beta1 * self.m[i].data[j] + (1.0 - self.beta1) * g;
 				self.v[i].data[j] = self.beta2 * self.v[i].data[j] + (1.0 - self.beta2) * g * g;
 
-				let m_hat = self.m[i].data[j] / (1.0 - self.beta1.powf(t));
-				let v_hat = self.v[i].data[j] / (1.0 - self.beta2.powf(t));
+				let m_hat = self.m[i].data[j] / bias_c1;
+				let v_hat = self.v[i].data[j] / bias_c2;
 
 				param.data[j] -= self.lr * m_hat / (v_hat.sqrt() + self.epsilon);
 			}
