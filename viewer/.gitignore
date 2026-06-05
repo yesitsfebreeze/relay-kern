@@ -1,3 +1,6 @@
 node_modules/
 dist/
 *.local
+
+# kern daemon runtime state
+.kern/
