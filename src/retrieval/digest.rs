@@ -38,7 +38,7 @@ fn dedup_key(s: &str) -> String {
 ///   restatements don't waste the budget.
 pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: usize) -> String {
 	let mut out = String::from("# kern memory\n\n");
-	let purpose = graph.root.purpose_text.trim();
+	let purpose = graph.root.anchor_text.trim();
 	if !purpose.is_empty() {
 		out.push_str("Purpose: ");
 		out.push_str(purpose);
@@ -118,9 +118,9 @@ mod tests {
 	use crate::base::types::{mk_entity, EntityKind};
 
 	#[test]
-	fn digest_has_purpose_and_hottest_first_capped() {
+	fn digest_has_anchor_and_hottest_first_capped() {
 		let mut g = GraphGnn::default();
-		g.root.purpose_text = "remember durable facts".to_string();
+		g.root.anchor_text = "remember durable facts".to_string();
 		let root_id = g.root.id.clone();
 		let kern = g.kerns.get_mut(&root_id).expect("root kern");
 		kern.entities.insert("a".into(), mk_entity("a", "cold fact", 0.1, EntityKind::Claim));

@@ -148,10 +148,10 @@ let g = read_recovered(graph);
 			unnamed += 1;
 		}
 	}
-	let purpose = if g.root.purpose_text.is_empty() {
+	let purpose = if g.root.anchor_text.is_empty() {
 		"(unset)"
 	} else {
-		&g.root.purpose_text
+		&g.root.anchor_text
 	};
 	let queue_depth = task_q.as_ref().map(|q| q.pending_count()).unwrap_or(0);
 

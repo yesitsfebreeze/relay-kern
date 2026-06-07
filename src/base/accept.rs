@@ -56,8 +56,8 @@ fn route_entity(g: &mut GraphGnn, kern_id: &str, thought: &Entity, is_dup: bool)
 				Some(k) => k,
 				None => break,
 			};
-			if kern.has_purpose() {
-				let dist = cosine_distance(&thought.vector, &kern.purpose_vec);
+			if kern.has_anchor() {
+				let dist = cosine_distance(&thought.vector, &kern.anchor_vec);
 				let p = acceptance_probability(dist, kern.inner_radius, kern.outer_radius);
 				p < 0.5
 			} else {
@@ -374,10 +374,10 @@ fn route_to_child_id(children: &[String], g: &GraphGnn, vec: &[f64]) -> Option<S
 	let mut best_p = 0.0;
 	for id in children {
 		let c = match g.loaded(id) {
-			Some(k) if k.is_named() && !k.purpose_vec.is_empty() => k,
+			Some(k) if k.is_named() && !k.anchor_vec.is_empty() => k,
 			_ => continue,
 		};
-		let dist = cosine_distance(vec, &c.purpose_vec);
+		let dist = cosine_distance(vec, &c.anchor_vec);
 		let p = acceptance_probability(dist, c.inner_radius, c.outer_radius);
 		if p > best_p {
 			best_p = p;

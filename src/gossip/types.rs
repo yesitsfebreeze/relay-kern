@@ -36,8 +36,8 @@ pub enum GossipPayload {
 pub struct SpherePayload {
 	pub network_id: String,
 	pub kern_id: String,
-	pub purpose_vec: Vec<f64>,
-	pub purpose_text: String,
+	pub anchor_vec: Vec<f64>,
+	pub anchor_text: String,
 	pub entity_id: String,
 	pub inner_radius: f64,
 	pub outer_radius: f64,

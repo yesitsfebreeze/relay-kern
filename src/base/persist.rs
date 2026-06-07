@@ -202,6 +202,23 @@ pub fn load_kern(dir: &str, id: &str) -> Result<Kern, PersistError> {
 	Ok(kern)
 }
 
+/// Delete a kern's on-disk file. Called when a kern is permanently removed
+/// (`GraphGnn::deregister`) so a reaped kern does not resurrect on the next
+/// `load_dir` — `load_dir` reads every `*.kern` in the directory, so a leftover
+/// file IS a live kern as far as the next start is concerned. A missing file is
+/// success (idempotent). Never touches the root or `_meta`.
+pub fn delete_kern(dir: &str, id: &str) {
+	if dir.is_empty() || id == "_meta" {
+		return;
+	}
+	let path = Path::new(dir).join(format!("{id}.kern"));
+	match fs::remove_file(&path) {
+		Ok(()) => {}
+		Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+		Err(e) => tracing::warn!(target: "kern.persist", kern = %id, error = %e, "failed to delete kern file"),
+	}
+}
+
 fn backfill_created_at(kern: &mut Kern) {
 	let now = std::time::SystemTime::now();
 	for t in kern.entities.values_mut() {
@@ -284,8 +301,8 @@ pub fn merged_root(g: &GraphGnn) -> Kern {
 		.unwrap_or_else(|| g.root.clone());
 	merged.id = g.root.id.clone();
 	merged.root_id = g.root.root_id.clone();
-	merged.purpose_text = g.root.purpose_text.clone();
-	merged.purpose_vec = g.root.purpose_vec.clone();
+	merged.anchor_text = g.root.anchor_text.clone();
+	merged.anchor_vec = g.root.anchor_vec.clone();
 	merged.inner_radius = g.root.inner_radius;
 	merged.outer_radius = g.root.outer_radius;
 	for (k, v) in &g.root.descriptors {
@@ -310,6 +327,26 @@ pub fn save_all(g: &GraphGnn) -> Result<(), PersistError> {
 	save_kern(&g.data_dir, &merged_root(g))?;
 	save_network_id(&g.data_dir, &g.network_id);
 	write_quant_mode(&quant_dir_sidecar(&g.data_dir), g.quant_mode);
+
+	// Prune orphaned kern files: any `<id>.kern` on disk that the live graph no
+	// longer knows (neither loaded nor in the unloaded tier) is a stale remnant
+	// of a deregistered kern. `load_dir` treats every file as a live kern, so
+	// without this a reaped kern resurrects on restart — the mechanism that let
+	// the unnamed-child runaway persist tens of thousands of empty kerns. The
+	// `delete_kern` in `deregister` handles the common path; this reconciles disk
+	// to memory on every full save as a backstop.
+	let keep: std::collections::HashSet<String> = g.all_ids().into_iter().collect();
+	let root_id = g.root.id.clone();
+	if let Ok(entries) = fs::read_dir(&g.data_dir) {
+		for entry in entries.flatten() {
+			let name = entry.file_name().to_string_lossy().to_string();
+			let Some(id) = name.strip_suffix(".kern") else { continue };
+			if id == "_meta" || id == root_id || keep.contains(id) {
+				continue;
+			}
+			delete_kern(&g.data_dir, id);
+		}
+	}
 	Ok(())
 }
 
@@ -365,18 +402,18 @@ mod tests {
 		let mut g = GraphGnn::new();
 		// Stale root entry in the map: empty purpose/descriptors.
 		let mut stale = g.root.clone();
-		stale.purpose_text = String::new();
+		stale.anchor_text = String::new();
 		stale.descriptors.clear();
 		g.register(stale);
 		// Authoritative values live on g.root.
-		g.root.purpose_text = "guiding purpose".to_string();
+		g.root.anchor_text = "guiding purpose".to_string();
 		g.root
 			.descriptors
 			.insert("chat".to_string(), "desc".to_string());
 
 		let merged = merged_root(&g);
 		assert_eq!(merged.id, g.root.id);
-		assert_eq!(merged.purpose_text, "guiding purpose");
+		assert_eq!(merged.anchor_text, "guiding purpose");
 		assert_eq!(merged.descriptors.get("chat").map(String::as_str), Some("desc"));
 	}
 
@@ -385,7 +422,7 @@ mod tests {
 		let dir = tempdir().unwrap();
 		let mut g = GraphGnn::new();
 		g.data_dir = dir.path().to_string_lossy().to_string();
-		g.root.purpose_text = "P".to_string();
+		g.root.anchor_text = "P".to_string();
 		g.root.descriptors.insert("k".to_string(), "v".to_string());
 
 		fs::create_dir_all(&g.data_dir).unwrap();
@@ -393,8 +430,31 @@ mod tests {
 		save_kern(&g.data_dir, &merged_root(&g)).unwrap();
 
 		let reloaded = load_kern(&g.data_dir, &g.root.id).unwrap();
-		assert_eq!(reloaded.purpose_text, "P");
+		assert_eq!(reloaded.anchor_text, "P");
 		assert_eq!(reloaded.descriptors.get("k").map(String::as_str), Some("v"));
+	}
+
+	#[test]
+	fn named_kern_with_anchor_vec_round_trips() {
+		// Guards the bincode-positional assumption behind the purpose->anchor
+		// rename: anchor_text/anchor_vec must survive save/load unchanged. If a
+		// future edit reorders Kern's fields, the decoded values shift and this
+		// fails — catching live-graph corruption before it ships.
+		let dir = tempdir().unwrap();
+		let d = dir.path().to_string_lossy().to_string();
+		let mut k = Kern::new("anchor-work", "root");
+		k.anchor_text = "work".to_string();
+		k.anchor_vec = vec![0.1, -0.2, 0.3, 0.4];
+		k.inner_radius = 0.15;
+		k.outer_radius = 0.55;
+		save_kern(&d, &k).unwrap();
+
+		let back = load_kern(&d, "anchor-work").unwrap();
+		assert_eq!(back.anchor_text, "work");
+		assert_eq!(back.anchor_vec, vec![0.1, -0.2, 0.3, 0.4]);
+		assert_eq!(back.inner_radius, 0.15);
+		assert_eq!(back.outer_radius, 0.55);
+		assert!(back.is_named() && back.has_anchor());
 	}
 
 	#[test]

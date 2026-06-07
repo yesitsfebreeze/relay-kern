@@ -129,6 +129,8 @@ pub enum Commands {
 	},
 	/// Print graph stats: thought/edge counts, tick heat, purpose.
 	Health,
+	/// Reap empty unnamed kerns and persist (run with the daemon stopped).
+	Gc,
 	/// Set or read the root purpose.
 	Purpose {
 		text: String,
@@ -215,30 +217,7 @@ pub(crate) fn resolve<'a>(arg: &'a Option<String>, fallback: &'a str) -> &'a str
 	arg.as_deref().unwrap_or(fallback)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_llm(
-	embed_url: &str,
-	embed_model: &str,
-	embed_key: &str,
-	reason_url: &str,
-	reason_model: &str,
-	reason_key: &str,
-	answer_url: &str,
-	answer_model: &str,
-	answer_key: &str,
-) -> crate::llm::Client {
-	crate::llm::Client::new(
-		reason_url,
-		reason_model,
-		reason_key,
-		answer_url,
-		answer_model,
-		answer_key,
-		embed_url,
-		embed_model,
-		embed_key,
-	)
-}
+pub(crate) use crate::llm::{Client, Endpoint};
 
 pub(crate) fn find_entity_by_prefix(
 	g: &GraphGnn,
@@ -259,10 +238,10 @@ pub(crate) fn find_entity_by_prefix(
 
 pub(crate) fn print_kern(kern: &Kern, g: &GraphGnn, depth: usize) {
 	let indent = "  ".repeat(depth);
-	let label = if kern.purpose_text.is_empty() {
+	let label = if kern.anchor_text.is_empty() {
 		"[unnamed]".to_string()
 	} else {
-		kern.purpose_text.clone()
+		kern.anchor_text.clone()
 	};
 	println!(
 		"{}kern:{}  thoughts:{}  reasons:{}",
@@ -387,6 +366,7 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		}
 
 		Commands::Health => admin::cmd_health(cfg),
+		Commands::Gc => admin::cmd_gc(cfg),
 
 		Commands::Purpose {
 			text,
@@ -439,6 +419,59 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	if let Some(j) = journal::global() {
 		j.set_max_bytes(cfg.journal.max_today_bytes);
 	}
+
+	// Runtime watchdog. A wedged daemon — deadlock on the graph lock, a panic
+	// loop, or every worker thread pinned in a blocking LLM call — keeps holding
+	// the hub TCP socket, so no peer can bind it and the viewer stays dead until
+	// the process is killed by hand (observed: a daemon stopped serving `/graph`
+	// AND heartbeating yet held `:7700` for 8+ minutes). An async task bumps
+	// `beat` every second; a DEDICATED OS thread — immune to runtime starvation,
+	// unlike any tokio task — force-exits the process if `beat` stops advancing.
+	// Exiting frees the socket so a healthy peer takes over the hub within
+	// `viewer::FAILOVER_RETRY`. The threshold (30s) is far above any single LLM
+	// call: normal blocking work pins one worker, never the time driver, so the
+	// beat keeps advancing — only a TOTAL stall trips the watchdog.
+	{
+		use std::sync::atomic::{AtomicU64, Ordering};
+		let beat = Arc::new(AtomicU64::new(0));
+		{
+			let beat = beat.clone();
+			tokio::spawn(async move {
+				let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+				loop {
+					tick.tick().await;
+					beat.fetch_add(1, Ordering::Relaxed);
+				}
+			});
+		}
+		std::thread::Builder::new()
+			.name("kern-watchdog".into())
+			.spawn(move || {
+				const CHECK_SECS: u64 = 5;
+				const STALL_LIMIT: u32 = 6; // 6 * 5s = 30s of no async progress
+				let mut last = 0u64;
+				let mut stalls = 0u32;
+				loop {
+					std::thread::sleep(std::time::Duration::from_secs(CHECK_SECS));
+					let now = beat.load(Ordering::Relaxed);
+					if now == last {
+						stalls += 1;
+						if stalls >= STALL_LIMIT {
+							// stderr → daemon.err.log, so the next wedge is visible.
+							eprintln!(
+								"kern watchdog: async runtime stalled ~{}s (graph deadlock or worker starvation) — exiting so a peer can take the hub",
+								u64::from(stalls) * CHECK_SECS
+							);
+							std::process::exit(101);
+						}
+					} else {
+						stalls = 0;
+						last = now;
+					}
+				}
+			})
+			.expect("spawn kern-watchdog thread");
+	}
 	// Effective reason endpoint: CLI flag wins when set, else fall back to the
 	// `[reason]` config section (which itself falls back to `[embed]`). Without
 	// this the daemon ignored configured reasoning entirely, so distillation /
@@ -458,16 +491,10 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	// so reading them here ignored `[embed]` in kern.toml — the daemon embedded
 	// with the default model even when the graph was built with another, a
 	// dimension mismatch that makes every cosine degenerate. Use cfg.embed.
-	let llm_client = build_llm(
-		&cfg.embed.url,
-		&cfg.embed.model,
-		&cfg.embed.key,
-		&reason_url,
-		&reason_model,
-		cfg.reason_key(),
-		cfg.answer_url(),
-		&cfg.answer.model,
-		cfg.answer_key(),
+	let llm_client = Client::new(
+		Endpoint::new(&reason_url, &reason_model, cfg.reason_key()),
+		Endpoint::new(cfg.answer_url(), &cfg.answer.model, cfg.answer_key()),
+		Endpoint::new(&cfg.embed.url, &cfg.embed.model, &cfg.embed.key),
 	);
 
 	let llm_fn: Option<crate::ingest::LlmFunc> = if !reason_url.is_empty() {
@@ -485,11 +512,27 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	{
 		let warm = llm_client.clone();
 		tokio::spawn(async move {
+			use futures_util::StreamExt as _;
+			// First tick fires immediately, so both models start loading at boot.
 			let mut tick = tokio::time::interval(std::time::Duration::from_secs(240));
 			loop {
 				tick.tick().await;
-				let _ = warm.embed("kern-keepalive").await;
-				let _ = warm.warm_answer().await;
+				// Warm BOTH models concurrently. They load into separate Ollama
+				// runners (the embedder and the 4b answer model coexist on an 8 GB
+				// GPU at num_ctx=8192), so serializing them just doubles the cold
+				// window before the first `/ask` is warm. The answer warm is a
+				// 1-token `/api/chat` with the real `num_ctx`/`keep_alive`, holding
+				// the exact runner the next `/ask` reuses; drain and discard it.
+				let embed = warm.embed("kern-keepalive");
+				let answer = async {
+					let mut gen = std::pin::pin!(warm.answer(crate::llm::AnswerParams {
+						messages: vec![("user".to_string(), "warm".to_string())],
+						stream: false,
+						num_predict: Some(1),
+					}));
+					while gen.next().await.is_some() {}
+				};
+				let (_, _) = tokio::join!(embed, answer);
 			}
 		});
 	}
@@ -500,17 +543,9 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		Arc::new(move |text: &str| -> Result<Vec<f64>, String> {
 			let c = c.clone();
 			let text = text.to_string();
-			match tokio::runtime::Handle::try_current() {
-				Ok(h) => {
-					// `block_in_place` hands this worker thread back to the
-					// runtime while we block, so `block_on` is legal here.
-					// Plain `block_on` on a runtime worker panics with
-					// "Cannot start a runtime from within a runtime".
-					let result =
-						tokio::task::block_in_place(|| h.block_on(c.embed(&text)));
-					result.map_err(|e: crate::llm::LlmError| e.to_string())
-				}
-				Err(_) => Err("no runtime".to_string()),
+			match crate::llm::block_on_in_place(c.embed(&text)) {
+				Some(r) => r.map_err(|e| e.to_string()),
+				None => Err("no runtime".to_string()),
 			}
 		})
 	};
@@ -529,6 +564,26 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	let worker = entry.worker.clone();
 	let q = entry.tick_q.clone();
 	let save_fn = entry.save_fn.clone();
+
+	// Self-heal the unnamed-kern fragmentation on startup. The historical spawn
+	// runaway (now fixed) left graphs with tens of thousands of empty kerns
+	// persisted to disk; since retrieval, tick, and the viewer are all O(loaded
+	// kerns), that bloat taxes every request. Reap them once here so every
+	// restart converges to a clean graph, then persist the compacted form.
+	{
+		let (before, reaped, after) = crate::base::locks::write_recovered(&g).gc_empty_kerns_counted();
+		if reaped > 0 {
+			tracing::info!(
+				target: "kern.startup",
+				reaped,
+				before,
+				after,
+				"reaped empty unnamed kerns"
+			);
+			eprintln!("kern: reaped {reaped} empty kerns ({before} -> {after})");
+			save_graph(&read_recovered(&g));
+		}
+	}
 
 	// Live graph viewer — a read-only web UI over the current graph. Localhost
 	// by default (cfg.serve.viewer); empty disables it.

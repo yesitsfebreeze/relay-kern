@@ -83,12 +83,12 @@ fn best_cluster(clusters: &[Cluster], min_size: usize, min_cohesion: f64) -> Opt
 	best
 }
 
-pub fn is_core_cluster(c: &Cluster, purpose_vec: &[f64]) -> bool {
-	if purpose_vec.is_empty() || c.members.is_empty() {
+pub fn is_core_cluster(c: &Cluster, anchor_vec: &[f64]) -> bool {
+	if anchor_vec.is_empty() || c.members.is_empty() {
 		return false;
 	}
 	let centroid = compute_centroid(&c.members);
-	cosine(&centroid, purpose_vec) >= KERN_COHESION_THRESHOLD
+	cosine(&centroid, anchor_vec) >= KERN_COHESION_THRESHOLD
 }
 
 pub fn cohesion(members: &[Entity]) -> f64 {
@@ -135,7 +135,7 @@ pub fn compute_centroid(members: &[Entity]) -> Vec<f64> {
 	centroid
 }
 
-pub fn purpose_prompt(c: &Cluster) -> String {
+pub fn anchor_prompt(c: &Cluster) -> String {
 	const MAX_SAMPLES: usize = 10;
 	let members = if c.members.len() > MAX_SAMPLES {
 		let centroid = compute_centroid(&c.members);

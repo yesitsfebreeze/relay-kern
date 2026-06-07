@@ -62,14 +62,14 @@ pub fn start_announce(node: Arc<Node>, graph: Arc<RwLock<GraphGnn>>) {
 					let payload = {
 						let g = read_recovered(&graph);
 						// Nothing worth announcing until the kern has a purpose.
-						if g.root.purpose_vec.is_empty() {
+						if g.root.anchor_vec.is_empty() {
 							None
 						} else {
 							Some(SpherePayload {
 								network_id: g.network_id.clone(),
 								kern_id: g.root.id.clone(),
-								purpose_text: g.root.purpose_text.clone(),
-								purpose_vec: g.root.purpose_vec.clone(),
+								anchor_text: g.root.anchor_text.clone(),
+								anchor_vec: g.root.anchor_vec.clone(),
 								entity_id: String::new(),
 								inner_radius: g.root.inner_radius,
 								outer_radius: g.root.outer_radius,
@@ -206,8 +206,8 @@ fn handle_question(d: &Deps, msg: GossipMessage) {
 		payload: GossipPayload::Sphere(SpherePayload {
 			network_id: g.network_id.clone(),
 			kern_id: g.root.id.clone(),
-			purpose_text: g.root.purpose_text.clone(),
-			purpose_vec: g.root.purpose_vec.clone(),
+			anchor_text: g.root.anchor_text.clone(),
+			anchor_vec: g.root.anchor_vec.clone(),
 			entity_id: hits[0].entity_id.clone(),
 			inner_radius: g.root.inner_radius,
 			outer_radius: g.root.outer_radius,
@@ -365,15 +365,15 @@ fn inject_remote_scope(g: &mut GraphGnn, sphere: &SpherePayload, _origin: &str) 
 	let phantom_id = format!("remote-{}-{}", sphere.network_id, sphere.kern_id);
 
 	if let Some(kern) = g.kerns.get_mut(&phantom_id) {
-		kern.purpose_text = sphere.purpose_text.clone();
-		kern.purpose_vec = sphere.purpose_vec.clone();
+		kern.anchor_text = sphere.anchor_text.clone();
+		kern.anchor_vec = sphere.anchor_vec.clone();
 		kern.inner_radius = sphere.inner_radius;
 		kern.outer_radius = sphere.outer_radius;
 	} else {
 		let mut k = Kern::new(&phantom_id, &g.root.id);
 		k.root_id = g.root.root_id.clone();
-		k.purpose_text = sphere.purpose_text.clone();
-		k.purpose_vec = sphere.purpose_vec.clone();
+		k.anchor_text = sphere.anchor_text.clone();
+		k.anchor_vec = sphere.anchor_vec.clone();
 		k.inner_radius = sphere.inner_radius;
 		k.outer_radius = sphere.outer_radius;
 		g.register(k);

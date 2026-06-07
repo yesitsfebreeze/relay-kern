@@ -101,7 +101,7 @@ fn do_cluster(
 
 		let mut spawn_indices = Vec::new();
 		for (i, c) in clusters.iter().enumerate() {
-			if is_named && is_core_cluster(c, &kern.purpose_vec) {
+			if is_named && is_core_cluster(c, &kern.anchor_vec) {
 				continue;
 			}
 			if c.members.len() >= KERN_MIN_CLUSTER_SIZE

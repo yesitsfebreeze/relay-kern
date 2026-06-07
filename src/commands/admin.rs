@@ -1,7 +1,7 @@
 use crate::base::constants::{KERN_INNER_RADIUS, KERN_OUTER_RADIUS};
 use crate::base::util::short_id;
 
-use super::{DescriptorAction, UnnamedAction, build_llm, load_graph, save_graph, with_graph};
+use super::{Client, DescriptorAction, Endpoint, UnnamedAction, load_graph, save_graph, with_graph};
 
 pub(super) fn cmd_compress(src: &str, mode_str: &str, out: Option<&str>) {
 	let Some(mode) = crate::quant::QuantizationMode::parse(mode_str) else {
@@ -31,10 +31,10 @@ pub(super) fn cmd_compress(src: &str, mode_str: &str, out: Option<&str>) {
 
 pub(super) fn cmd_health(cfg: &crate::config::Config) {
 	let g = load_graph(cfg);
-	let purpose = if g.root.purpose_text.is_empty() {
+	let purpose = if g.root.anchor_text.is_empty() {
 		"(unset)".to_string()
 	} else {
-		g.root.purpose_text.clone()
+		g.root.anchor_text.clone()
 	};
 
 	println!("data_dir:    {}", g.data_dir);
@@ -57,10 +57,10 @@ pub(super) fn cmd_health(cfg: &crate::config::Config) {
 	println!("descriptors: {}", g.root.descriptors.len());
 
 	for k in &kerns {
-		let label = if k.purpose_text.is_empty() {
+		let label = if k.anchor_text.is_empty() {
 			"[unnamed]"
 		} else {
-			&k.purpose_text
+			&k.anchor_text
 		};
 		println!(
 			"  kern:{}  thoughts:{}  reasons:{}",
@@ -71,13 +71,29 @@ pub(super) fn cmd_health(cfg: &crate::config::Config) {
 	}
 }
 
+/// Offline compaction: reap empty unnamed kerns and persist the result. Run with
+/// the daemon stopped — it loads from disk, GCs, and saves, so a live daemon would
+/// race and re-persist the bloated in-memory graph. Cheap, idempotent, safe to
+/// re-run. The daemon also does this on startup; this command is for a one-shot
+/// compaction without spinning up the full daemon.
+pub(super) fn cmd_gc(cfg: &crate::config::Config) {
+	let mut g = load_graph(cfg);
+	let (before, reaped, after) = g.gc_empty_kerns_counted();
+	save_graph(&g);
+	println!("gc: reaped {reaped} empty kerns ({before} -> {after})");
+}
+
 pub(super) async fn cmd_purpose(
 	cfg: &crate::config::Config,
 	text: &str,
 	embed_url: &str,
 	embed_model: &str,
 ) {
-	let llm_client = build_llm(embed_url, embed_model, &cfg.embed.key, "", "", "", "", "", "");
+	let llm_client = Client::new(
+		Endpoint::default(),
+		Endpoint::default(),
+		Endpoint::new(embed_url, embed_model, &cfg.embed.key),
+	);
 	let vec = match llm_client.embed(text).await {
 		Ok(v) => v,
 		Err(e) => {
@@ -86,8 +102,8 @@ pub(super) async fn cmd_purpose(
 		}
 	};
 	with_graph(cfg, |g| {
-		g.root.purpose_text = text.to_string();
-		g.root.purpose_vec = vec;
+		g.root.anchor_text = text.to_string();
+		g.root.anchor_vec = vec;
 		g.root.inner_radius = KERN_INNER_RADIUS;
 		g.root.outer_radius = KERN_OUTER_RADIUS;
 	});

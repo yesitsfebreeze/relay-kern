@@ -343,8 +343,8 @@ pub struct SnapshotReason {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotKern {
 	pub id: String,
-	pub purpose_text: String,
-	pub purpose_vec: Vec<f64>,
+	pub anchor_text: String,
+	pub anchor_vec: Vec<f64>,
 	pub inner_radius: f64,
 	pub outer_radius: f64,
 	pub parent: String,

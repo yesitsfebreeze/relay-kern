@@ -15,7 +15,7 @@ use crate::base::util;
 use crate::config::TickConfig;
 
 use super::cluster::{
-	centroid_thought, largest_cohesive_cluster_for_naming, purpose_prompt, vector_cluster,
+	centroid_thought, largest_cohesive_cluster_for_naming, anchor_prompt, vector_cluster,
 };
 use super::queue::{task, task_extra, Queue, TaskKind};
 
@@ -54,7 +54,7 @@ let llm = match llm {
 				return;
 			}
 		};
-		let prompt = purpose_prompt(&clusters[idx]);
+		let prompt = anchor_prompt(&clusters[idx]);
 		let centroid_id = centroid_thought(&clusters[idx]).map(|t| t.id.clone());
 		let parent_id = kern.parent.clone();
 		(prompt, centroid_id, parent_id)
@@ -82,8 +82,8 @@ let llm = match llm {
 		if kern.is_named() {
 			return;
 		}
-		kern.purpose_text = name_text.clone();
-		kern.purpose_vec = name_vec.unwrap_or_default();
+		kern.anchor_text = name_text.clone();
+		kern.anchor_vec = name_vec.unwrap_or_default();
 		kern.inner_radius = KERN_INNER_RADIUS;
 		kern.outer_radius = KERN_OUTER_RADIUS;
 
@@ -341,16 +341,13 @@ pub fn do_reembed(
 				_ => None,
 			};
 			if let Some(r) = k.reasons.get_mut(&rid) {
-				match nv {
-					// Recomputed the edge vector — correction recorded, clear dirty.
-					Some(v) => {
-						r.vector = v;
-						r.dirty = false;
-					}
-					// An endpoint isn't embedded yet (cold/unembedded). Leave the
-					// edge dirty so a later sweep retries once both endpoints have
-					// vectors — otherwise it would be stuck with a stale vector.
-					None => {}
+				// Recomputed the edge vector — correction recorded, clear dirty. When
+				// an endpoint isn't embedded yet (cold/unembedded) `nv` is None: leave
+				// the edge dirty so a later sweep retries once both endpoints have
+				// vectors, rather than pinning a stale vector.
+				if let Some(v) = nv {
+					r.vector = v;
+					r.dirty = false;
 				}
 			}
 		}

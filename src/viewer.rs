@@ -417,7 +417,11 @@ async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl 
 			})
 			.collect();
 		messages.push(("user".to_string(), prompt));
-		let mut gen = Box::pin(st.llm.complete_stream(messages));
+		let mut gen = Box::pin(st.llm.answer(crate::llm::AnswerParams {
+			messages,
+			stream: true,
+			num_predict: None,
+		}));
 		while let Some(item) = gen.next().await {
 			match item {
 				Ok(tok) => yield Ok(Event::default().event("token").data(json!({ "t": tok }).to_string())),
@@ -645,8 +649,8 @@ async fn graph_json(State(st): State<LocalState>) -> Json<serde_json::Value> {
 		.map(|k| {
 			json!({
 				"id": k.id,
-				"label": if k.purpose_text.trim().is_empty() { "(unnamed)".to_string() } else { truncate(&k.purpose_text, 60) },
-				"named": !k.purpose_text.trim().is_empty(),
+				"label": if k.anchor_text.trim().is_empty() { "(unnamed)".to_string() } else { truncate(&k.anchor_text, 60) },
+				"named": !k.anchor_text.trim().is_empty(),
 				"parent": k.parent,
 				"children": k.children,
 				"inner_radius": k.inner_radius,

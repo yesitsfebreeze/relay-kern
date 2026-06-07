@@ -71,10 +71,10 @@ impl Server {
 				unnamed += 1;
 			}
 		}
-		let purpose = if g.root.purpose_text.is_empty() {
+		let purpose = if g.root.anchor_text.is_empty() {
 			"(unset)".to_string()
 		} else {
-			g.root.purpose_text.clone()
+			g.root.anchor_text.clone()
 		};
 		let descriptors = g.root.descriptors.len();
 		serde_json::json!({

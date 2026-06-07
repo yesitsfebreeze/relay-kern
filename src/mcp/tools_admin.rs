@@ -20,30 +20,26 @@ impl Server {
 
 		if p.text.is_empty() {
 			let g = read_recovered(&self.graph);
-			let purpose = if g.root.purpose_text.is_empty() {
+			let purpose = if g.root.anchor_text.is_empty() {
 				"(unset)".to_string()
 			} else {
-				g.root.purpose_text.clone()
+				g.root.anchor_text.clone()
 			};
 			return tool_result_json(&serde_json::json!({"purpose": purpose}));
 		}
 
 		let vec = match &self.llm {
-			Some(llm) => {
-				let Some(handle) = tokio::runtime::Handle::try_current().ok() else {
-					return tool_error("no tokio runtime");
-				};
-				match tokio::task::block_in_place(|| handle.block_on(llm.embed(&p.text))) {
-					Ok(v) => v,
-					Err(e) => return tool_error(&format!("embed failed: {e}")),
-				}
-			}
+			Some(llm) => match crate::llm::block_on_in_place(llm.embed(&p.text)) {
+				Some(Ok(v)) => v,
+				Some(Err(e)) => return tool_error(&format!("embed failed: {e}")),
+				None => return tool_error("no tokio runtime"),
+			},
 			None => return tool_error("no embed client configured"),
 		};
 
 		let mut g = write_recovered(&self.graph);
-		g.root.purpose_text = p.text.clone();
-		g.root.purpose_vec = vec;
+		g.root.anchor_text = p.text.clone();
+		g.root.anchor_vec = vec;
 		g.root.inner_radius = crate::base::constants::KERN_INNER_RADIUS;
 		g.root.outer_radius = crate::base::constants::KERN_OUTER_RADIUS;
 		drop(g);

@@ -422,8 +422,8 @@ pub struct EntityRef {
 pub struct Kern {
 	pub id: String,
 	pub root_id: String,
-	pub purpose_text: String,
-	pub purpose_vec: Vec<f64>,
+	pub anchor_text: String,
+	pub anchor_vec: Vec<f64>,
 	pub inner_radius: f64,
 	pub outer_radius: f64,
 	pub spawn_reason_id: String,
@@ -476,11 +476,11 @@ impl Kern {
 	}
 
 	pub fn is_unnamed(&self) -> bool {
-		self.purpose_text.is_empty()
+		self.anchor_text.is_empty()
 	}
 
 	pub fn is_named(&self) -> bool {
-		!self.purpose_text.is_empty()
+		!self.anchor_text.is_empty()
 	}
 
 	pub fn is_immortal(&self) -> bool {
@@ -488,11 +488,11 @@ impl Kern {
 	}
 
 	pub fn is_dead(&self) -> bool {
-		self.purpose_text.is_empty() && self.entities.is_empty()
+		self.anchor_text.is_empty() && self.entities.is_empty()
 	}
 
-	pub fn has_purpose(&self) -> bool {
-		!self.purpose_text.is_empty() && !self.purpose_vec.is_empty()
+	pub fn has_anchor(&self) -> bool {
+		!self.anchor_text.is_empty() && !self.anchor_vec.is_empty()
 	}
 
 	pub fn is_remote(&self) -> bool {
@@ -503,8 +503,8 @@ impl Kern {
 		Self {
 			id: String::new(),
 			root_id: String::new(),
-			purpose_text: String::new(),
-			purpose_vec: Vec::new(),
+			anchor_text: String::new(),
+			anchor_vec: Vec::new(),
 			inner_radius: 0.0,
 			outer_radius: 0.0,
 			spawn_reason_id: String::new(),
