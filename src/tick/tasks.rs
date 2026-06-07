@@ -73,7 +73,7 @@ let llm = match llm {
 	}
 	let name_vec = embed.and_then(|e| e(&name_text).ok());
 
-	{
+	let promoted_to_root = {
 		let mut graph = write_recovered(g);
 		let kern = match graph.kerns.get_mut(kern_id) {
 			Some(k) => k,
@@ -101,7 +101,12 @@ let llm = match llm {
 				add_reason(parent, spawn);
 			}
 		}
-	}
+
+		// Emergent promotion: a dense cluster that crystallized inside the
+		// `generic` catch-all becomes a first-class anchor directly under the
+		// root, so future matching memories route to it instead of generic.
+		crate::base::accept::promote_to_root_if_generic(&mut graph, kern_id)
+	};
 
 	{
 		let graph = read_recovered(g);
@@ -117,6 +122,11 @@ let llm = match llm {
 	q.enqueue(task(TaskKind::Persist, kern_id));
 	if !parent_id.is_empty() {
 		q.enqueue(task(TaskKind::Persist, &parent_id));
+	}
+	// Promotion rewired the root's children — persist it too.
+	if promoted_to_root {
+		let root_id = read_recovered(g).root.id.clone();
+		q.enqueue(task(TaskKind::Persist, &root_id));
 	}
 }
 

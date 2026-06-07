@@ -444,6 +444,37 @@ pub(crate) fn root_anchor_ids(g: &GraphGnn) -> Vec<String> {
 		.collect()
 }
 
+/// Promote a kern to a first-class anchor under the root if it currently sits
+/// directly under the `generic` catch-all. Called after the tick names a dense
+/// generic cluster: the freshly-named kern graduates from generic to root level
+/// so future matching memories route straight to it. Returns whether it moved.
+pub(crate) fn promote_to_root_if_generic(g: &mut GraphGnn, kern_id: &str) -> bool {
+	let parent_id = match g.loaded(kern_id) {
+		Some(k) => k.parent.clone(),
+		None => return false,
+	};
+	let under_generic = g
+		.loaded(&parent_id)
+		.map(|p| p.anchor_text == GENERIC_ANCHOR)
+		.unwrap_or(false);
+	if !under_generic {
+		return false;
+	}
+	let root_id = g.root.id.clone();
+	if let Some(gen_kern) = g.get_mut(&parent_id) {
+		gen_kern.children.retain(|c| c.as_str() != kern_id);
+	}
+	if let Some(k) = g.get_mut(kern_id) {
+		k.parent = root_id.clone();
+	}
+	if let Some(root) = g.get_mut(&root_id) {
+		if !root.children.iter().any(|c| c.as_str() == kern_id) {
+			root.children.push(kern_id.to_string());
+		}
+	}
+	true
+}
+
 /// Demote a named root anchor and reparent its kern under `generic`, so its
 /// existing memories fall back to the catch-all. Returns whether an anchor of
 /// that name was found and removed.
@@ -626,5 +657,30 @@ mod tests {
 			"anchor no longer a named root child"
 		);
 		assert!(!remove_anchor(&mut g, "missing"), "missing anchor -> false");
+	}
+
+	#[test]
+	fn promotes_generic_child_to_root() {
+		let mut g = GraphGnn::new();
+		let root = g.root.id.clone();
+		let generic = get_or_spawn_generic_child(&mut g, &root);
+		let root_net = g.root.root_id.clone();
+		// A freshly-named kern sitting under generic (as the tick would leave it).
+		let child = Kern::new_named_child(&generic, &root_net, "shaders", vec![1.0, 0.0, 0.0]);
+		let cid = child.id.clone();
+		g.register(child);
+		g.get_mut(&generic).unwrap().children.push(cid.clone());
+
+		assert!(promote_to_root_if_generic(&mut g, &cid), "promoted out of generic");
+		assert!(root_anchor_ids(&g).contains(&cid), "now a root-level anchor");
+		assert_eq!(g.loaded(&cid).unwrap().parent, root, "parent rewired to root");
+		assert!(
+			!g.loaded(&generic).unwrap().children.contains(&cid),
+			"detached from generic"
+		);
+		assert!(
+			!promote_to_root_if_generic(&mut g, &cid),
+			"idempotent once at root level"
+		);
 	}
 }
