@@ -28,8 +28,17 @@ fn main() {
 		.expect("build tokio runtime");
 
 	rt.block_on(async {
+		// Pin this instance to its project root (the nearest ancestor holding a
+		// `.kern`), so the endpoint tag, data_dir, and capture spool all anchor
+		// to the same directory. Without this, a daemon launched from a subdir
+		// or the wrong cwd resolves the relative `.kern/data` against an empty
+		// location and silently boots an empty graph while still serving queries.
 		let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-		let cfg = Config::load(&cwd).unwrap_or_default();
+		let root = Config::resolve_root(&cwd);
+		if root != cwd {
+			let _ = std::env::set_current_dir(&root);
+		}
+		let cfg = Config::load(&root).unwrap_or_default();
 		let cli = Cli::parse();
 
 		match cli.command {

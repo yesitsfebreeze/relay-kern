@@ -32,7 +32,7 @@ pub use serve::ServeConfig;
 pub use tick::TickConfig;
 pub use watcher::WatcherConfig;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -83,6 +83,21 @@ impl Default for Config {
 	}
 }
 
+/// Resolve a possibly-relative `data_dir` to an absolute path under `cwd`, so
+/// the instance pins the data location to the cwd it loaded from instead of
+/// re-resolving a relative path (e.g. `.kern/data` from the project kern.toml)
+/// against the process's live current_dir at every file op — which silently
+/// reads/writes an empty graph when the daemon was launched from the wrong
+/// directory. Absolute values pass through unchanged.
+fn anchor_data_dir(data_dir: &str, cwd: &Path) -> String {
+	let p = Path::new(data_dir);
+	if p.is_absolute() {
+		data_dir.to_string()
+	} else {
+		cwd.join(p).to_string_lossy().into_owned()
+	}
+}
+
 impl Config {
 	pub fn load(cwd: &Path) -> Result<Self, config_io::Error> {
 		// kern owns its own paths. User scope: <XDG_CONFIG>/kern/kern.toml
@@ -92,7 +107,23 @@ impl Config {
 			.join("kern")
 			.join("kern.toml");
 		let project = cwd.join(".kern").join("kern.toml");
-		config_io::load_layered(&user, &project)
+		let mut cfg: Self = config_io::load_layered(&user, &project)?;
+		cfg.data_dir = anchor_data_dir(&cfg.data_dir, cwd);
+		Ok(cfg)
+	}
+
+	/// Nearest ancestor of `start` (inclusive) that contains a `.kern`
+	/// directory, else `start` itself. A kern instance launched from a
+	/// subdirectory of a project still anchors to the project root, so it never
+	/// boots an empty graph against a `.kern` that does not exist beside its
+	/// accidental cwd.
+	pub fn resolve_root(start: &Path) -> PathBuf {
+		for anc in start.ancestors() {
+			if anc.join(".kern").is_dir() {
+				return anc.to_path_buf();
+			}
+		}
+		start.to_path_buf()
 	}
 
 	pub fn validate(&self) -> Result<(), String> {
@@ -137,5 +168,44 @@ impl Config {
 		} else {
 			&self.answer.key
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::path::PathBuf;
+
+	#[test]
+	fn load_anchors_relative_data_dir_to_cwd() {
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path().canonicalize().unwrap();
+		let kern = root.join(".kern");
+		std::fs::create_dir_all(&kern).unwrap();
+		std::fs::write(kern.join("kern.toml"), "data_dir = \".kern/data\"\n").unwrap();
+
+		let cfg = Config::load(&root).expect("load");
+
+		let got = PathBuf::from(&cfg.data_dir);
+		assert!(got.is_absolute(), "data_dir must be absolute, got {got:?}");
+		assert_eq!(got, root.join(".kern").join("data"));
+	}
+
+	#[test]
+	fn resolve_root_walks_up_to_nearest_kern_dir() {
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path().canonicalize().unwrap();
+		std::fs::create_dir_all(root.join(".kern")).unwrap();
+		let deep = root.join("a").join("b");
+		std::fs::create_dir_all(&deep).unwrap();
+
+		assert_eq!(Config::resolve_root(&deep), root);
+	}
+
+	#[test]
+	fn resolve_root_returns_start_when_no_kern_ancestor() {
+		let dir = tempfile::tempdir().unwrap();
+		let start = dir.path().canonicalize().unwrap();
+		assert_eq!(Config::resolve_root(&start), start);
 	}
 }
