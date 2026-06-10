@@ -7,6 +7,7 @@ use super::graph::{migrate_root_id, GraphGnn};
 use super::types::Kern;
 use super::util;
 use crate::quant::QuantizationMode;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -242,26 +243,46 @@ pub fn load_dir(dir: &str) -> Result<GraphGnn, PersistError> {
 	kerns.insert(root_id.clone(), root);
 
 	let unloaded = std::collections::HashSet::new();
-	let mut skipped = 0usize;
-	for entry in fs::read_dir(dir)? {
-		let entry = entry?;
-		let name = entry.file_name().to_string_lossy().to_string();
-		if !name.ends_with(".kern") {
-			continue;
-		}
-		let id = &name[..name.len() - ".kern".len()];
-		if id == root_id || id == "_meta" {
-			continue;
-		}
-		match load_kern(dir, id) {
+
+	// Enumerate sibling shard ids first (cheap directory walk), then decode them
+	// in parallel. A real graph can hold hundreds of thousands of `.kern` files;
+	// a sequential read+bincode-decode of each one made `load_dir` an O(shards)
+	// multi-minute hang that blocked every CLI command and the daemon's startup
+	// reap. The decode is pure CPU+IO per file with no cross-shard state, so it
+	// fans out cleanly across rayon's pool — wall time drops by ~core count.
+	let ids: Vec<String> = fs::read_dir(dir)?
+		.filter_map(Result::ok)
+		.filter_map(|entry| {
+			let name = entry.file_name().to_string_lossy().to_string();
+			let id = name.strip_suffix(".kern")?;
+			if id == root_id || id == "_meta" {
+				return None;
+			}
+			Some(id.to_string())
+		})
+		.collect();
+
+	let decoded: Vec<Result<Kern, (String, PersistError)>> = ids
+		.par_iter()
+		.map(|id| match load_kern(dir, id) {
 			Ok(mut k) => {
 				migrate_root_id(&mut k, &network_id);
+				Ok(k)
+			}
+			Err(e) => Err((id.clone(), e)),
+		})
+		.collect();
+
+	let mut skipped = 0usize;
+	for result in decoded {
+		match result {
+			Ok(k) => {
 				kerns.insert(k.id.clone(), k);
 			}
 			// A corrupt/unreadable sibling must not vanish silently: warn so the
 			// orphaned data is visible rather than producing a quietly truncated
 			// graph. The root is loaded above and still hard-errors.
-			Err(e) => {
+			Err((id, e)) => {
 				skipped += 1;
 				tracing::warn!(target: "kern.persist", kern = %id, error = %e, "skipping corrupt/unreadable kern file");
 			}
@@ -472,5 +493,27 @@ mod tests {
 			g.map().keys().all(|k| k != "bad"),
 			"corrupt kern is skipped, not inserted"
 		);
+	}
+
+	#[test]
+	fn load_dir_loads_every_sibling() {
+		// Parity guard for the parallel decode: a graph with many sibling kerns
+		// must come back complete and order-independent. Mixes a corrupt sibling
+		// in so the skip path is exercised concurrently with the happy path.
+		let dir = tempdir().unwrap();
+		let d = dir.path().to_string_lossy().to_string();
+		save_kern(&d, &Kern::new("root", "")).unwrap();
+		for i in 0..64 {
+			save_kern(&d, &Kern::new(&format!("child{i}"), "root")).unwrap();
+		}
+		fs::write(format!("{d}/bad.kern"), b"not a valid bincode kern").unwrap();
+
+		let g = load_dir(&d).expect("load_dir loads a large sibling set");
+		// root + 64 children, corrupt one skipped.
+		assert_eq!(g.map().len(), 65, "root + 64 children all present");
+		for i in 0..64 {
+			assert!(g.loaded(&format!("child{i}")).is_some(), "child{i} loaded");
+		}
+		assert!(g.map().keys().all(|k| k != "bad"), "corrupt sibling skipped");
 	}
 }
