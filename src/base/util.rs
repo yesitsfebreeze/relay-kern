@@ -55,7 +55,10 @@ pub fn now_nanos() -> u128 {
 /// link/enrich paths in commands, mcp, and tick.
 pub fn explain_relationship_prompt(a: &str, b: &str) -> String {
 	format!(
-		"Explain in one sentence why these two pieces of knowledge are related:\n\nA: {}\n\nB: {}\n\nRelationship:",
+		"Write one sentence describing the specific connection between these two pieces of knowledge. \
+		Name the exact concept, mechanism, cause, or logical dependency that links them. \
+		Do NOT use vague words like \"related\", \"similar\", \"connected\", or \"both deal with\".\n\n\
+		A: {}\n\nB: {}\n\nConnection:",
 		truncate(a, 500),
 		truncate(b, 500),
 	)

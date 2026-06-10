@@ -85,6 +85,22 @@ pub enum ReasonKind {
 	Rephrase = 6,
 }
 
+impl ReasonKind {
+	/// Fallback display label for structural edges that have no LLM text.
+	/// Returns `None` for kinds that carry no explanatory label.
+	pub fn fallback_label(self) -> Option<&'static str> {
+		match self {
+			ReasonKind::Supersedes => Some("superseded by a newer version"),
+			ReasonKind::Rephrase   => Some("rephrased as"),
+			_ => None,
+		}
+	}
+
+	pub fn is_semantic(self) -> bool {
+		matches!(self, ReasonKind::Similarity | ReasonKind::Provenance | ReasonKind::Ratification)
+	}
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Acl {
 	pub scope: String,

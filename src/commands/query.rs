@@ -1,7 +1,7 @@
 use crate::base::search::{find_entity, search_all_unlocked};
 use crate::base::util::{short_id, truncate};
 
-use super::{Client, Endpoint, load_graph, save_graph};
+use super::{Client, Endpoint, load_graph};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn cmd_query(
@@ -41,7 +41,9 @@ pub(super) async fn cmd_query(
 		None,
 		None,
 	);
-	save_graph(&g);
+	// No save: cmd_query is read-only — access/heat bumps land on the cloned
+	// result entities, not on `g`. Persisting here would only risk clobbering
+	// a running daemon's newer on-disk state with this CLI snapshot.
 
 	if result.entities.is_empty() {
 		println!("no results");
@@ -55,6 +57,14 @@ pub(super) async fn cmd_query(
 			short_id(&st.entity.id),
 			truncate(&st.entity.text(), 120),
 		);
+	}
+
+	// Print enriched relationship edges for the top results so the caller can
+	// see the specific logical connections between retrieved entities.
+	let chain_text = crate::retrieval::answer::format_chains(&g, &result.path_chains);
+	if !chain_text.trim().is_empty() {
+		println!("\n--- Connections ---");
+		print!("{chain_text}");
 	}
 
 	if answer {

@@ -64,7 +64,7 @@ markdown.\n\nCONVERSATION:\n{conversation}\n"
 /// (`[[...]]`) is unwrapped. Malformed JSON or multiple sibling top-level
 /// arrays fail gracefully to an empty vec. The JSON field `kind` maps to
 /// `Claim::descriptor`, falling back to `"fact"` when missing or unknown.
-fn parse_claims(raw: &str) -> Vec<Claim> {
+pub(crate) fn parse_claims(raw: &str) -> Vec<Claim> {
 	let (start, end) = match (raw.find('['), raw.rfind(']')) {
 		(Some(s), Some(e)) if e > s => (s, e),
 		_ => return Vec::new(),

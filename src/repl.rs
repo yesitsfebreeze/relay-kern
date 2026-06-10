@@ -12,7 +12,7 @@ pub async fn run(
 	task_q: Option<Arc<crate::tick::queue::Queue>>,
 	dedup_threshold: f64,
 ) {
-let stdin = io::stdin();
+	let stdin = io::stdin();
 	let mut stdout = io::stdout();
 
 	loop {
@@ -48,7 +48,7 @@ let stdin = io::stdin();
 }
 
 async fn do_query(graph: &Arc<RwLock<GraphGnn>>, llm: &crate::llm::Client, text: &str) {
-if text.is_empty() {
+	if text.is_empty() {
 		println!("usage: query <text>");
 		return;
 	}
@@ -67,16 +67,7 @@ if text.is_empty() {
 	let rcfg = crate::config::RetrievalConfig::default();
 	let result = {
 		let g = read_recovered(graph);
-		crate::retrieval::answer::query(
-			&g,
-			&rcfg,
-			&vec,
-			text,
-			mode,
-			Some(&llm_fn),
-			None,
-			None,
-		)
+		crate::retrieval::answer::query(&g, &rcfg, &vec, text, mode, Some(&llm_fn), None, None)
 	};
 
 	if result.entities.is_empty() {
@@ -104,7 +95,7 @@ async fn do_ingest(
 	text: &str,
 	dedup_threshold: f64,
 ) {
-if text.is_empty() {
+	if text.is_empty() {
 		println!("usage: ingest <text>");
 		return;
 	}
@@ -136,7 +127,7 @@ if text.is_empty() {
 }
 
 fn do_health(graph: &Arc<RwLock<GraphGnn>>, task_q: &Option<Arc<crate::tick::queue::Queue>>) {
-let g = read_recovered(graph);
+	let g = read_recovered(graph);
 	let kerns = g.all();
 	let mut total_entities = 0usize;
 	let mut total_reasons = 0usize;
@@ -167,7 +158,7 @@ let g = read_recovered(graph);
 }
 
 fn do_list(graph: &Arc<RwLock<GraphGnn>>) {
-let g = read_recovered(graph);
+	let g = read_recovered(graph);
 	let mut count = 0usize;
 	for k in g.all() {
 		for t in k.entities.values() {
@@ -185,7 +176,7 @@ let g = read_recovered(graph);
 }
 
 fn do_pulse(graph: &Arc<RwLock<GraphGnn>>, task_q: &Option<Arc<crate::tick::queue::Queue>>) {
-let q = match task_q {
+	let q = match task_q {
 		Some(q) => q,
 		None => {
 			println!("task queue not available");
@@ -199,7 +190,7 @@ let q = match task_q {
 }
 
 fn print_help() {
-println!("Commands:");
+	println!("Commands:");
 	println!("  query <text>   Search and get LLM answer");
 	println!("  q <text>       Alias for query");
 	println!("  ingest <text>  Add text to the graph");

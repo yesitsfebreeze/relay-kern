@@ -118,3 +118,40 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
 		}),
 	]
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn definitions_are_well_formed_and_complete() {
+		let defs = tool_definitions();
+		let names: Vec<&str> = defs
+			.iter()
+			.map(|d| d["name"].as_str().expect("each tool has a string name"))
+			.collect();
+
+		let expected = [
+			"query", "ingest", "link", "forget", "degrade", "health", "anchor", "descriptor",
+			"pulse",
+		];
+		assert_eq!(names, expected, "tool set must match (order intentional)");
+
+		for d in &defs {
+			let name = d["name"].as_str().unwrap();
+			assert!(
+				!name.is_empty(),
+				"tool name must not be empty"
+			);
+			let schema = &d["inputSchema"];
+			assert!(
+				schema.is_object(),
+				"{name}: inputSchema must be present and an object"
+			);
+			assert_eq!(
+				schema["type"], "object",
+				"{name}: inputSchema.type must be 'object'"
+			);
+		}
+	}
+}

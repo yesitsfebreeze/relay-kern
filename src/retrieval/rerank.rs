@@ -24,8 +24,8 @@ pub fn llm_rerank(
 
 	let mut prompt = String::from(
 		"You are re-ranking search results by relevance to a query. \
-		Return ONLY a JSON array of integer indices in best-to-worst order, no prose. \
-		Example: [2,0,1,3]\n\n",
+		Return ONLY a JSON array of integer indices in best-to-worst order, no prose, no decimal points. \
+		Example: [2,0,1,3] — integers only, never [2.0,0.0,1.0,3.0]\n\n",
 	);
 	prompt.push_str(&format!("Query: {query_text}\n\nCandidates:\n"));
 	for (i, st) in results.iter().take(pool).enumerate() {
@@ -72,7 +72,11 @@ pub fn parse_ranking(response: &str, pool: usize) -> Option<Vec<usize>> {
 	let list = arr.as_array()?;
 	let mut out = Vec::with_capacity(list.len());
 	for v in list {
-		let i = v.as_i64()? as usize;
+		// Accept integer JSON (1) or whole-number float JSON (1.0); reject fractions (1.5).
+		let i = v
+			.as_i64()
+			.or_else(|| v.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))?
+			as usize;
 		if i < pool {
 			out.push(i);
 		}
@@ -121,8 +125,14 @@ mod tests {
 	}
 
 	#[test]
-	fn non_integer_element_discards_ranking() {
-		// A malformed element bails the whole ranking (don't trust a partial).
+	fn whole_number_floats_accepted() {
+		// Some LLMs emit [1.0, 0.0, 2.0] instead of [1, 0, 2] — still valid.
+		assert_eq!(parse_ranking("[1.0, 0.0, 2.0]", 3), Some(vec![1, 0, 2]));
+	}
+
+	#[test]
+	fn fractional_float_discards_ranking() {
+		// 1.5 is not a valid index — bail the whole ranking (don't trust partial).
 		assert_eq!(parse_ranking("[1.5, 0]", 3), None);
 	}
 }

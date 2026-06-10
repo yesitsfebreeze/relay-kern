@@ -31,6 +31,7 @@ use std::convert::Infallible;
 use serde_json::{json, Value};
 
 use crate::base::graph::GraphGnn;
+use trnsprt::McpServer as _;
 use crate::base::locks::{read_recovered, write_recovered};
 use crate::base::util::truncate;
 use crate::config::RetrievalConfig;
@@ -43,6 +44,7 @@ struct LocalState {
 	graph: Graph,
 	retrieval: RetrievalConfig,
 	queue: std::sync::Arc<crate::tick::queue::Queue>,
+	mcp: Arc<crate::mcp::Server>,
 }
 
 /// Heartbeat cadence and the staleness window for treating a registry entry as
@@ -72,15 +74,16 @@ fn registry_file() -> PathBuf {
 
 /// Run the viewer: start this daemon's local graph server, register it, and
 /// contend for the aggregator role. Never returns under normal operation.
-pub async fn run(graph: Graph, llm: crate::llm::Client, retrieval: RetrievalConfig, queue: std::sync::Arc<crate::tick::queue::Queue>, agg_addr: &str) -> std::io::Result<()> {
+pub async fn run(graph: Graph, llm: crate::llm::Client, retrieval: RetrievalConfig, queue: std::sync::Arc<crate::tick::queue::Queue>, mcp: Arc<crate::mcp::Server>, agg_addr: &str) -> std::io::Result<()> {
 	// 1. Local graph server on an ephemeral loopback port (this daemon's own data).
 	let local = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
 	let local_addr = local.local_addr()?.to_string();
-	let local_state = LocalState { graph: graph.clone(), retrieval: retrieval.clone(), queue: queue.clone() };
+	let local_state = LocalState { graph: graph.clone(), retrieval: retrieval.clone(), queue: queue.clone(), mcp };
 	let local_app = Router::new()
 		.route("/graph", get(graph_json))
 		.route("/ask_retrieve", post(ask_retrieve))
 		.route("/edit", post(edit))
+		.route("/tool", post(local_tool))
 		.with_state(local_state);
 	tokio::spawn(async move {
 		if let Err(e) = axum::serve(local, local_app).await {
@@ -108,6 +111,7 @@ pub async fn run(graph: Graph, llm: crate::llm::Client, retrieval: RetrievalConf
 					.route("/graph", get(aggregate))
 					.route("/ask", post(ask))
 					.route("/edit", post(hub_edit))
+					.route("/tool", post(hub_tool))
 					.with_state(hub);
 				if let Err(e) = axum::serve(listener, app).await {
 					tracing::warn!(target: "kern.viewer", error = %e, "aggregator hub exited; will retry");
@@ -212,6 +216,7 @@ fn merge_peer(tag: &str, v: &Value, nodes: &mut Vec<Value>, links: &mut Vec<Valu
 	for l in v.get("links").and_then(Value::as_array).into_iter().flatten() {
 		let mut l = l.clone();
 		if let Some(o) = l.as_object_mut() {
+			if let Some(id) = o.get("id") { let p = pre(id); o.insert("id".into(), p); }
 			if let Some(s) = o.get("source") { let p = pre(s); o.insert("source".into(), p); }
 			if let Some(t) = o.get("target") { let p = pre(t); o.insert("target".into(), p); }
 		}
@@ -325,7 +330,13 @@ async fn ask_retrieve(State(st): State<LocalState>, Json(body): Json<AskRetrieve
 			if let Some((r, _)) = crate::base::search::find_reason(&g, node_id) {
 				reasons.push(json!({
 					"id": r.id,
-					"text": if r.text.is_empty() { format!("{:?}", r.kind) } else { truncate(&r.text, 160) },
+					"from": r.from,
+					"to": r.to,
+					"text": if !r.text.is_empty() {
+						truncate(&r.text, 160).to_string()
+					} else {
+						r.kind.fallback_label().unwrap_or("").to_string()
+					},
 					"kind": format!("{:?}", r.kind),
 				}));
 			}
@@ -351,9 +362,77 @@ struct AskBody {
 
 fn default_ask_k() -> usize { 8 }
 
+static AGENT_SYSTEM_PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn build_agent_system_prompt() -> &'static str {
+	AGENT_SYSTEM_PROMPT.get_or_init(|| {
+		let defs = crate::mcp::tools::tool_definitions();
+		let tools: Vec<String> = defs.iter().map(|d| {
+			let name = d.get("name").and_then(Value::as_str).unwrap_or("");
+			let desc = d.get("description").and_then(Value::as_str).unwrap_or("");
+			format!("- {name}: {desc}")
+		}).collect();
+		format!(
+			"You are kern's assistant. Answer questions using the provided memory context.\n\
+			 You can call tools when the user asks to modify the knowledge graph (add/remove memories, \
+			 manage anchors, create links). Do not call tools for questions — answer those directly.\n\n\
+			 Available tools:\n{}\n\n\
+			 To call a tool output exactly: <tool_call>{{\"name\":\"TOOL\",\"args\":{{...}}}}</tool_call>\n\
+			 A tool call must be on its own, not embedded mid-sentence.",
+			tools.join("\n")
+		)
+	})
+}
+
+struct ToolCall {
+	name: String,
+	args: Value,
+}
+
+/// Extract visible text and any <tool_call>…</tool_call> blocks from an LLM response.
+fn extract_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
+	let mut visible = String::new();
+	let mut calls = Vec::new();
+	let mut rest = text;
+	while let Some(open) = rest.find("<tool_call>") {
+		visible.push_str(&rest[..open]);
+		rest = &rest[open + "<tool_call>".len()..];
+		if let Some(close) = rest.find("</tool_call>") {
+			let json_str = rest[..close].trim();
+			rest = &rest[close + "</tool_call>".len()..];
+			if let Ok(v) = serde_json::from_str::<Value>(json_str) {
+				if let Some(name) = v.get("name").and_then(Value::as_str) {
+					let args = v.get("args").cloned().unwrap_or(Value::Object(Default::default()));
+					calls.push(ToolCall { name: name.to_string(), args });
+				}
+			}
+		}
+	}
+	visible.push_str(rest);
+	(visible.trim().to_string(), calls)
+}
+
+/// Execute one tool on the first available peer. Returns (ok, result_text).
+async fn exec_tool(client: &reqwest::Client, peers: &[String], name: &str, args: &Value) -> (bool, String) {
+	let body = json!({ "name": name, "args": args });
+	for addr in peers {
+		let url = format!("http://{addr}/tool");
+		if let Ok(r) = client.post(&url).timeout(FANOUT_TIMEOUT).json(&body).send().await {
+			if let Ok(v) = r.json::<Value>().await {
+				let ok = v.get("ok").and_then(Value::as_bool).unwrap_or(false);
+				let result = v.get("result").and_then(Value::as_str).unwrap_or("done").to_string();
+				return (ok, result);
+			}
+		}
+	}
+	(false, "no daemon available".to_string())
+}
+
 /// Hub oracle endpoint: embed the question once, fan retrieval out to peers,
-/// merge sources by score, emit a `sources` SSE event, then stream the generated
-/// answer as `token` events, ending with `done`. Embed/LLM failure → `error`.
+/// merge sources by score, emit a `sources` SSE event, then run an agentic
+/// tool loop. The LLM can call kern tools (ingest, anchor, forget, etc.) by
+/// emitting <tool_call>…</tool_call> blocks; each is executed and the result
+/// fed back before the final answer is streamed as `token` events.
 async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
 	let stream = async_stream::stream! {
 		let q = body.question.trim().to_string();
@@ -390,6 +469,12 @@ async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl 
 						let rid = r.get("id").and_then(Value::as_str).map(|s| s.to_string());
 						if let (Some(o), Some(rid)) = (r.as_object_mut(), rid) {
 							o.insert("id".into(), json!(format!("{addr}|{rid}")));
+							if let Some(f) = o.get("from").and_then(Value::as_str).map(|s| s.to_string()) {
+								o.insert("from".into(), json!(format!("{addr}|{f}")));
+							}
+							if let Some(t) = o.get("to").and_then(Value::as_str).map(|s| s.to_string()) {
+								o.insert("to".into(), json!(format!("{addr}|{t}")));
+							}
 						}
 						reason_items.push(r);
 					}
@@ -398,39 +483,108 @@ async fn ask(State(st): State<HubState>, Json(body): Json<AskBody>) -> Sse<impl 
 			}
 		}
 		let mut merged = rank_peers(&tagged, k);
-		// `n` here (1-based) must match build_ask_prompt's enumerate() numbering so
-		// the model's inline [n] citations line up with the browser's source tiles.
 		for (n, s) in merged.iter_mut().enumerate() {
 			if let Some(o) = s.as_object_mut() { o.insert("n".into(), json!(n + 1)); }
 		}
 		yield Ok(Event::default().event("sources").data(json!({ "entities": merged, "chains": chains, "reasons": reason_items }).to_string()));
-		let prompt = build_ask_prompt(&merged, &chains, &q);
-		let mut messages: Vec<(String, String)> = body.history.iter()
-			.rev().take(6).rev()
-			.map(|t| {
-				// Chat API only accepts user/assistant/system; map anything else to user.
-				let role = match t.role.as_str() {
-					"assistant" | "system" => t.role.clone(),
-					_ => "user".to_string(),
-				};
-				(role, t.content.clone())
-			})
-			.collect();
-		messages.push(("user".to_string(), prompt));
-		let mut gen = Box::pin(st.llm.answer(crate::llm::AnswerParams {
-			messages,
-			stream: true,
-			num_predict: None,
-		}));
-		while let Some(item) = gen.next().await {
-			match item {
-				Ok(tok) => yield Ok(Event::default().event("token").data(json!({ "t": tok }).to_string())),
-				Err(e) => { yield Ok(Event::default().event("error").data(json!({ "message": e.to_string() }).to_string())); return; }
-			}
+
+		// Build initial message list with system prompt + history + context
+		let user_prompt = build_ask_prompt(&merged, &chains, &q);
+		let mut messages: Vec<(String, String)> = vec![("system".to_string(), build_agent_system_prompt().to_owned())];
+		for t in body.history.iter().rev().take(6).rev() {
+			let role = match t.role.as_str() {
+				"assistant" | "system" => t.role.clone(),
+				_ => "user".to_string(),
+			};
+			messages.push((role, t.content.clone()));
 		}
+		messages.push(("user".to_string(), user_prompt));
+
+		const MAX_ITERS: usize = 8;
+		let mut tool_idx = 0usize;
+
+		for _iter in 0..MAX_ITERS {
+			// Collect full response so we can detect tool calls before emitting anything.
+			let mut response = String::new();
+			let mut gen = Box::pin(st.llm.answer(crate::llm::AnswerParams {
+				messages: messages.clone(),
+				stream: false,
+				num_predict: None,
+			}));
+			let mut had_err = false;
+			while let Some(item) = gen.next().await {
+				match item {
+					Ok(tok) => response.push_str(&tok),
+					Err(e) => {
+						yield Ok(Event::default().event("error").data(json!({ "message": e.to_string() }).to_string()));
+						had_err = true;
+						break;
+					}
+				}
+			}
+			if had_err { return; }
+
+			let (visible, tool_calls) = extract_tool_calls(&response);
+
+			// Emit visible text (text outside any tool call blocks)
+			if !visible.is_empty() {
+				yield Ok(Event::default().event("token").data(json!({ "t": visible }).to_string()));
+			}
+
+			if tool_calls.is_empty() {
+				break;
+			}
+
+			// Execute each tool call and emit events
+			let mut result_ctx = String::new();
+			for tc in &tool_calls {
+				let idx = tool_idx;
+				tool_idx += 1;
+				yield Ok(Event::default().event("tool_call").data(
+					json!({ "name": tc.name, "args": tc.args, "idx": idx }).to_string()
+				));
+				let (ok, result_text) = exec_tool(&st.client, &peers, &tc.name, &tc.args).await;
+				yield Ok(Event::default().event("tool_result").data(
+					json!({ "name": tc.name, "result": result_text, "ok": ok, "idx": idx }).to_string()
+				));
+				result_ctx.push_str(&format!("Tool `{}` result: {}\n", tc.name, result_text));
+			}
+
+			// Feed tool results back and continue
+			messages.push(("assistant".to_string(), response));
+			messages.push(("user".to_string(), format!("{result_ctx}Continue.")));
+		}
+
 		yield Ok(Event::default().event("done").data("{}"));
 	};
 	Sse::new(stream)
+}
+
+/// Hub endpoint: broadcast a tool call to all live peers, return first success.
+async fn hub_tool(State(st): State<HubState>, Json(body): Json<Value>) -> Json<Value> {
+	let peers = live_peers();
+	if peers.is_empty() {
+		return Json(json!({ "ok": false, "error": "no daemons available" }));
+	}
+	let mut last_ok: Option<Value> = None;
+	let mut errors: Vec<String> = Vec::new();
+	for addr in &peers {
+		let url = format!("http://{addr}/tool");
+		match st.client.post(&url).timeout(FANOUT_TIMEOUT).json(&body).send().await {
+			Ok(r) => match r.json::<Value>().await {
+				Ok(v) => {
+					if v.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+						last_ok = Some(v);
+					} else {
+						errors.push(v.get("error").and_then(Value::as_str).unwrap_or("error").to_string());
+					}
+				}
+				Err(e) => errors.push(e.to_string()),
+			},
+			Err(e) => errors.push(e.to_string()),
+		}
+	}
+	last_ok.map(Json).unwrap_or_else(|| Json(json!({ "ok": false, "error": errors.join("; ") })))
 }
 
 /// Build the generation prompt from merged source texts + per-daemon chain
@@ -552,6 +706,27 @@ struct EditBody {
 	kind: String,
 }
 
+/// Peer endpoint: execute a kern MCP tool locally and return the result.
+async fn local_tool(State(st): State<LocalState>, Json(body): Json<ToolBody>) -> Json<Value> {
+	match st.mcp.call_tool(&body.name, &body.args) {
+		Ok(r) => {
+			let text = r.content.iter()
+				.filter_map(|c: &Value| c.get("text").and_then(Value::as_str))
+				.collect::<Vec<_>>()
+				.join("\n");
+			Json(json!({ "ok": !r.is_error, "result": text }))
+		}
+		Err(e) => Json(json!({ "ok": false, "error": format!("{e:?}") })),
+	}
+}
+
+#[derive(serde::Deserialize)]
+struct ToolBody {
+	name: String,
+	#[serde(default)]
+	args: Value,
+}
+
 /// Peer endpoint: edit an entity or reason by id, mark dirty, enqueue reembed + persist.
 async fn edit(State(st): State<LocalState>, Json(body): Json<EditBody>) -> Json<Value> {
 	let is_reason = body.kind == "reason";
@@ -632,6 +807,7 @@ async fn graph_json(State(st): State<LocalState>) -> Json<serde_json::Value> {
 		for r in kern.reasons.values() {
 			if node_ids.contains(&r.from) && node_ids.contains(&r.to) {
 				links.push(json!({
+					"id": r.id,
 					"source": r.from,
 					"target": r.to,
 					"kind": format!("{:?}", r.kind),

@@ -75,6 +75,7 @@ impl MockKernServer {
                 label: label.into(),
                 snippet: label.into(),
                 score: 1.0,
+                edges: vec![],
             },
             ts_ms: 0,
         });
@@ -143,6 +144,7 @@ impl KernRpc for MockKernServer {
                     label,
                     snippet,
                     score: 1.0,
+                    edges: vec![],
                 },
                 ts_ms: now_ms(),
             };

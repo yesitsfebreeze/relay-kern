@@ -275,6 +275,10 @@ async fn run_standalone(cfg: &crate::config::Config) {
 		save_fn,
 		task_q: Some(q),
 		cfg: Arc::new(cfg.clone()),
+		cache: crate::retrieval::cache::QueryCache::shared(
+			cfg.retrieval.query_cache_cap,
+			cfg.retrieval.query_cache_theta,
+		),
 	};
 	server.run_stdio();
 }

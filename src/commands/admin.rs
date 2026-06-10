@@ -156,14 +156,69 @@ pub(super) fn cmd_descriptor(cfg: &crate::config::Config, action: DescriptorActi
 	}
 }
 
-pub(super) fn cmd_peers() {
-	unimplemented_subcommand("federation");
+pub(super) fn cmd_peers(cfg: &crate::config::Config) {
+	print!("{}", peers_summary(cfg));
 }
 
-/// Unified message for subcommands whose backing subsystem is not yet
-/// wired up in the Rust port. One place to flip when the subsystem lands.
-pub(super) fn unimplemented_subcommand(subsystem: &str) {
-	println!("{subsystem} is not yet implemented in the Rust port.");
+fn peers_summary(cfg: &crate::config::Config) -> String {
+	let g = &cfg.gossip;
+	let mut out = String::new();
+	if !g.enabled {
+		out.push_str("gossip:  disabled\n");
+		out.push_str("  enable with [gossip] enabled = true in kern.toml\n");
+		return out;
+	}
+	out.push_str("gossip:     enabled\n");
+	out.push_str(&format!("addr:       {}\n", g.addr));
+	out.push_str(&format!(
+		"discovery:  {} (udp :{})\n",
+		if g.discovery { "on" } else { "off" },
+		g.discovery_port
+	));
+	if g.peers.is_empty() {
+		out.push_str("peers:      (none configured)\n");
+	} else {
+		out.push_str(&format!("peers ({}):\n", g.peers.len()));
+		for p in &g.peers {
+			out.push_str(&format!("  {p}\n"));
+		}
+	}
+	out.push_str("  (runtime-discovered peers visible in daemon logs)\n");
+	out
+}
+
+#[cfg(test)]
+mod peers_tests {
+	use super::*;
+	use crate::config::Config;
+
+	#[test]
+	fn peers_summary_gossip_disabled() {
+		let cfg = Config::default();
+		let s = peers_summary(&cfg);
+		assert!(s.contains("disabled"), "disabled state shown");
+		assert!(s.contains("enabled = true"), "enable hint shown");
+	}
+
+	#[test]
+	fn peers_summary_enabled_no_seed_peers() {
+		let mut cfg = Config::default();
+		cfg.gossip.enabled = true;
+		let s = peers_summary(&cfg);
+		assert!(s.contains("enabled"), "enabled state shown");
+		assert!(s.contains("none configured"), "empty peer list shown");
+	}
+
+	#[test]
+	fn peers_summary_enabled_with_seed_peers() {
+		let mut cfg = Config::default();
+		cfg.gossip.enabled = true;
+		cfg.gossip.peers = vec!["192.168.1.10:7400".into(), "192.168.1.11:7400".into()];
+		let s = peers_summary(&cfg);
+		assert!(s.contains("192.168.1.10:7400"), "first peer listed");
+		assert!(s.contains("192.168.1.11:7400"), "second peer listed");
+		assert!(s.contains("peers (2)"), "count shown");
+	}
 }
 
 pub(super) fn cmd_register(cfg: &crate::config::Config, path: &str) {

@@ -11,7 +11,6 @@ use crate::gnn::model::Model;
 use crate::gnn::optim::Adam;
 use crate::gnn::persist::{marshal_weights, unmarshal_weights};
 use crate::gnn::tensor::Tensor;
-use crate::gnn::train::TrainConfig;
 
 /// Single source of truth for GnnConfig field defaults, shared by the runtime
 /// [`GnnConfig::defaults`] and the serde `crate::config::GnnConfig`
@@ -90,16 +89,8 @@ pub fn run_learned_propagation(
 		let _ = unmarshal_weights(&mut model, &snap.weights);
 	}
 
-	let _config = TrainConfig {
-		epochs: cfg.train_epochs,
-		lr: cfg.train_learning_rate,
-		log_every: 0,
-		clip_norm: 0.0,
-	};
-
 	let pos = snap.pos_edges.clone();
 	let neg = neg_edges.clone();
-	let _dummy_labels = Tensor::zeros(1, 1);
 	let mut optim = Adam::new(cfg.train_learning_rate);
 
 	for _epoch in 0..cfg.train_epochs {
@@ -135,7 +126,7 @@ pub fn run_learned_propagation(
 		updates.insert(id.clone(), gnn_normalize(&result));
 	}
 
-	let weights = marshal_weights(&model).unwrap_or_default();
+	let weights = marshal_weights(&model).map_err(|e| format!("marshal weights: {e}"))?;
 	Ok(PropagationResult { updates, weights })
 }
 
@@ -193,4 +184,84 @@ pub fn gnn_normalize(v: &[f64]) -> Vec<f64> {
 
 fn has_nan_or_inf(v: &[f64]) -> bool {
 	v.iter().any(|x| x.is_nan() || x.is_infinite())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Build a tiny connected snapshot: `n` nodes, `dim` features, a path of
+	/// positive edges. Enough for `run_learned_propagation` to train without
+	/// any persistence or LLM dependency.
+	fn tiny_snapshot(n: usize, dim: usize) -> GnnSnapshot {
+		let mut graph = Graph::new();
+		for i in 0..n {
+			let feats: Vec<f64> = (0..dim).map(|d| ((i + d) as f64).sin()).collect();
+			graph.add_node(&format!("n{i}"), feats).unwrap();
+		}
+		let mut pos_edges = Vec::new();
+		for i in 0..n - 1 {
+			graph
+				.add_edge(&format!("n{i}"), &format!("n{}", i + 1), vec![1.0])
+				.unwrap();
+			pos_edges.push([i, i + 1]);
+		}
+		let data: Vec<f64> = (0..n * dim).map(|k| ((k as f64) * 0.1).cos()).collect();
+		GnnSnapshot {
+			ids: (0..n).map(|i| format!("n{i}")).collect(),
+			features: Tensor::new(n, dim, data).unwrap(),
+			graph,
+			pos_edges,
+			weights: Vec::new(),
+		}
+	}
+
+	#[test]
+	fn empty_snapshot_is_an_error() {
+		let snap = GnnSnapshot {
+			ids: Vec::new(),
+			features: Tensor::zeros(0, 0),
+			graph: Graph::new(),
+			pos_edges: Vec::new(),
+			weights: Vec::new(),
+		};
+		let err = match run_learned_propagation(&snap, &GnnConfig::defaults()) {
+			Err(e) => e,
+			Ok(_) => panic!("expected error for empty snapshot"),
+		};
+		assert_eq!(err, "empty snapshot");
+	}
+
+	#[test]
+	fn happy_path_returns_finite_updates_and_weights() {
+		let dim = 8;
+		let snap = tiny_snapshot(6, dim);
+		let cfg = GnnConfig {
+			train_epochs: 3,
+			..GnnConfig::defaults()
+		};
+		let result = run_learned_propagation(&snap, &cfg).unwrap();
+
+		assert_eq!(result.updates.len(), snap.ids.len());
+		assert!(!result.weights.is_empty(), "weights should be marshalled");
+		for id in &snap.ids {
+			let v = result.updates.get(id).expect("every id has an update");
+			assert_eq!(v.len(), dim);
+			assert!(v.iter().all(|x| x.is_finite()), "updates must be finite");
+		}
+	}
+
+	#[test]
+	fn sample_negative_edges_avoids_positives_and_self_loops() {
+		let pos = vec![[0, 1], [1, 2]];
+		let neg = sample_negative_edges(5, &pos, 4);
+		for e in &neg {
+			assert_ne!(e[0], e[1], "no self loops");
+			let (lo, hi) = if e[0] < e[1] { (e[0], e[1]) } else { (e[1], e[0]) };
+			assert!(
+				!pos.contains(&[lo, hi]),
+				"negative edge must not be a positive edge"
+			);
+		}
+	}
 }

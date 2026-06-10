@@ -50,6 +50,7 @@ impl MockSearchServer {
                 label: "Rust borrow checker rejects aliased mutable refs".into(),
                 snippet: "&mut T is unique.".into(),
                 score: 0.95,
+                edges: vec![],
             },
             EntityRef {
                 id: "e:doc:1".into(),
@@ -59,6 +60,7 @@ impl MockSearchServer {
                 label: "src/main.rs".into(),
                 snippet: "fn main() { ... }".into(),
                 score: 0.81,
+                edges: vec![],
             },
             EntityRef {
                 id: "e:q:1".into(),
@@ -68,6 +70,7 @@ impl MockSearchServer {
                 label: "Why does borrow checker block this?".into(),
                 snippet: "T-101".into(),
                 score: 0.72,
+                edges: vec![],
             },
             EntityRef {
                 id: "e:claim:1".into(),
@@ -77,6 +80,7 @@ impl MockSearchServer {
                 label: "Agents recommend using RefCell".into(),
                 snippet: "(superseded)".into(),
                 score: 0.30,
+                edges: vec![],
             },
         ]
     }

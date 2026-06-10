@@ -2,6 +2,7 @@ mod admin;
 mod graph_ops;
 mod ingest_cmd;
 mod mcp_cmd;
+mod profile_cmd;
 mod query;
 mod reembed;
 
@@ -129,6 +130,16 @@ pub enum Commands {
 	},
 	/// Print graph stats: thought/edge counts, tick heat, purpose.
 	Health,
+	/// Time every hot path (load, embed, search, query stages, distill,
+	/// digest) and print a scaled timeline. Read-only.
+	Profile {
+		/// Query text driving the embed/search/query stages.
+		#[arg(long, default_value = "what is this project about")]
+		text: String,
+		/// Skip LLM-dependent stages (hyde, rerank, answer, distill).
+		#[arg(long)]
+		no_llm: bool,
+	},
 	/// Reap empty unnamed kerns and persist (run with the daemon stopped).
 	Gc,
 	/// Manage anchors: named top-level buckets the root routes memories into.
@@ -382,13 +393,14 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		}
 
 		Commands::Health => admin::cmd_health(cfg),
+		Commands::Profile { text, no_llm } => profile_cmd::cmd_profile(cfg, &text, no_llm).await,
 		Commands::Gc => admin::cmd_gc(cfg),
 
 		Commands::Anchor { action } => admin::cmd_anchor(cfg, action).await,
 
 		Commands::Degrade { id } => graph_ops::cmd_degrade(cfg, &id),
 		Commands::Descriptor { action } => admin::cmd_descriptor(cfg, action),
-		Commands::Peers => admin::cmd_peers(),
+		Commands::Peers => admin::cmd_peers(cfg),
 		Commands::Register { path } => admin::cmd_register(cfg, &path),
 		Commands::Unnamed { action } => admin::cmd_unnamed(cfg, action),
 		Commands::Mcp => mcp_cmd::cmd_mcp(cfg).await,
@@ -589,6 +601,21 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		}
 	}
 
+	// Build the MCP server early — shared by the viewer (tool endpoints) and
+	// the RPC surface below. Created here so both can reference the same Arc.
+	let mcp_server = std::sync::Arc::new(crate::mcp::Server {
+		graph: g.clone(),
+		worker: worker.clone(),
+		llm: Some(llm_client.clone()),
+		save_fn: save_fn.clone(),
+		task_q: Some(q.clone()),
+		cfg: std::sync::Arc::new(cfg.clone()),
+		cache: crate::retrieval::cache::QueryCache::shared(
+			cfg.retrieval.query_cache_cap,
+			cfg.retrieval.query_cache_theta,
+		),
+	});
+
 	// Live graph viewer — a read-only web UI over the current graph. Localhost
 	// by default (cfg.serve.viewer); empty disables it.
 	if !cfg.serve.viewer.is_empty() {
@@ -597,8 +624,9 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 		let viewer_llm = llm_client.clone();
 		let viewer_retrieval = cfg.retrieval.clone();
 		let viewer_q = q.clone();
+		let viewer_mcp = mcp_server.clone();
 		tokio::spawn(async move {
-			if let Err(e) = crate::viewer::run(vg, viewer_llm, viewer_retrieval, viewer_q, &vaddr).await {
+			if let Err(e) = crate::viewer::run(vg, viewer_llm, viewer_retrieval, viewer_q, viewer_mcp, &vaddr).await {
 				tracing::warn!(target: "kern.viewer", error = %e, "graph viewer failed to start");
 			}
 		});
@@ -775,15 +803,6 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	tokio::spawn(async move {
 		tokio::signal::ctrl_c().await.ok();
 		let _ = shutdown_tx.send(());
-	});
-
-	let mcp_server = Arc::new(crate::mcp::Server {
-		graph: g.clone(),
-		worker: worker.clone(),
-		llm: Some(llm_client.clone()),
-		save_fn: save_fn.clone(),
-		task_q: Some(q.clone()),
-		cfg: Arc::new(cfg.clone()),
 	});
 
 	// Singleton kern_rpc surface on the per-user `kern.sock` endpoint.

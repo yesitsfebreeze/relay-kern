@@ -91,20 +91,30 @@ fn resource_health(server: &Server) -> String {
 	serde_json::to_string(&server.health_stats()).unwrap_or_default()
 }
 
+/// Cap for the `kern://local/thoughts` resource: it advertises "top thoughts
+/// by global rank", so return the highest-scoring slice rather than an
+/// unbounded full-graph dump.
+const TOP_THOUGHTS: usize = 50;
+
 fn resource_thoughts(server: &Server) -> String {
 	let g = read_recovered(&server.graph);
-	let mut all = Vec::new();
+	let mut all: Vec<(f64, serde_json::Value)> = Vec::new();
 	for kern in g.all() {
 		for t in kern.entities.values() {
-			all.push(serde_json::json!({
-				"id": t.id,
-				"score": t.score,
-				"text": truncate(&t.text(), 200),
-				"kern": kern.id,
-			}));
+			all.push((
+				t.score,
+				serde_json::json!({
+					"id": t.id,
+					"score": t.score,
+					"text": truncate(&t.text(), 200),
+					"kern": kern.id,
+				}),
+			));
 		}
 	}
-	serde_json::to_string(&all).unwrap_or_default()
+	all.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+	let top: Vec<serde_json::Value> = all.into_iter().take(TOP_THOUGHTS).map(|(_, v)| v).collect();
+	serde_json::to_string(&top).unwrap_or_default()
 }
 
 fn resource_kerns(server: &Server) -> String {
@@ -136,13 +146,7 @@ fn resource_thought(server: &Server, id: &str) -> String {
 		Some((thought, kern_id)) => {
 			let mut edges = Vec::new();
 			if let Some(kern) = g.kerns.get(&kern_id) {
-				let mut rids = Vec::new();
-				if let Some(from_list) = kern.by_from.get(&thought.id) {
-					rids.extend(from_list.iter().cloned());
-				}
-				if let Some(to_list) = kern.by_to.get(&thought.id) {
-					rids.extend(to_list.iter().cloned());
-				}
+				let rids = crate::base::reason::collect_reason_ids(kern, &thought.id);
 				for rid in &rids {
 					if let Some(re) = kern.reasons.get(rid) {
 						edges.push(serde_json::json!({

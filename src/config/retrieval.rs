@@ -77,6 +77,12 @@ pub struct RetrievalConfig {
 	pub adaptive_ef_max: usize,
 	pub adaptive_ef_step: usize,
 	pub adaptive_ef_spread_epsilon: f64,
+	/// Semantic query cache: number of answered queries retained before LRU
+	/// eviction. `0` disables the cache.
+	pub query_cache_cap: usize,
+	/// Cosine floor for a semantic cache hit. High (≈0.97) so only paraphrases
+	/// and re-asks share an entry, never merely topical neighbours.
+	pub query_cache_theta: f64,
 }
 
 impl Default for RetrievalConfig {
@@ -139,6 +145,8 @@ impl Default for RetrievalConfig {
 			adaptive_ef_max: 128,
 			adaptive_ef_step: 128,
 			adaptive_ef_spread_epsilon: 0.02,
+			query_cache_cap: crate::retrieval::cache::DEFAULT_CAP,
+			query_cache_theta: crate::retrieval::cache::DEFAULT_THETA,
 		}
 	}
 }

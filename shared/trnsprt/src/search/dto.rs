@@ -39,8 +39,9 @@ pub enum EntityStatusLite {
 
 /// Mirror of `kern::Reason` kinds. One variant per typed edge in the
 /// connected index.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum EdgeKind {
+    #[default]
     Answers,
     Supports,
     Contradicts,
@@ -51,6 +52,24 @@ pub enum EdgeKind {
     Instances,
     PartOf,
     Consolidates,
+}
+
+// ---- edge reference (relationship) ----------------------------------------
+
+/// One enriched relationship edge attached to a search hit. Carries the
+/// sentence that explains the specific logical connection so callers can
+/// reason about WHY two entities are linked, not just THAT they are.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct EdgeRef {
+    pub from: String,
+    pub to: String,
+    pub kind: EdgeKind,
+    /// LLM-generated sentence naming the exact mechanism, cause, or logical
+    /// dependency linking `from` → `to`. Empty until kern tick enrichment;
+    /// callers should skip unenriched edges.
+    pub text: String,
+    /// Cosine similarity between the two endpoint vectors.
+    pub score: f32,
 }
 
 // ---- entity reference (search hit) ----------------------------------------
@@ -72,6 +91,11 @@ pub struct EntityRef {
     pub snippet: String,
     /// Fused score (HNSW + BM25 + PageRank + heat). Higher = better.
     pub score: f32,
+    /// Enriched relationship edges incident to this entity. Only edges with
+    /// a non-empty `text` sentence are included. Empty when no enriched
+    /// edges exist or the response predates this field.
+    #[serde(default)]
+    pub edges: Vec<EdgeRef>,
 }
 
 // ---- search ---------------------------------------------------------------
@@ -167,6 +191,13 @@ mod dto_serde_tests {
             label: "main.rs".into(),
             snippet: "fn main() {}".into(),
             score: 0.92,
+            edges: vec![EdgeRef {
+                from: "e1".into(),
+                to: "e2".into(),
+                kind: EdgeKind::Supports,
+                text: "e1 provides the indexing mechanism that e2 depends on".into(),
+                score: 0.87,
+            }],
         };
         let json = serde_json::to_string(&original).unwrap();
         let back: EntityRef = serde_json::from_str(&json).unwrap();
@@ -174,6 +205,16 @@ mod dto_serde_tests {
         assert_eq!(back.kind, original.kind);
         assert_eq!(back.scheme, original.scheme);
         assert!((back.score - original.score).abs() < f32::EPSILON);
+        assert_eq!(back.edges.len(), 1);
+        assert_eq!(back.edges[0].text, original.edges[0].text);
+    }
+
+    #[test]
+    fn entity_ref_with_no_edges_roundtrips_json() {
+        // Ensure #[serde(default)] lets old payloads without `edges` deserialise cleanly.
+        let json = r#"{"id":"e0","kind":"Fact","status":"Active","scheme":"inline","label":"x","snippet":"y","score":0.5}"#;
+        let back: EntityRef = serde_json::from_str(json).unwrap();
+        assert!(back.edges.is_empty(), "missing edges field defaults to empty vec");
     }
 
     #[test]
@@ -186,6 +227,7 @@ mod dto_serde_tests {
             label: "T-9".into(),
             snippet: "why?".into(),
             score: 0.1,
+            edges: vec![],
         };
         let cfg = bincode::config::standard();
         let bytes = bincode::serde::encode_to_vec(&original, cfg).unwrap();

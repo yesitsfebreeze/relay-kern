@@ -7,7 +7,7 @@ mod tools_mutate;
 mod tools_query;
 
 use std::io::{BufReader, Read, Write};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::Serialize;
 use serde_json::value::RawValue;
@@ -16,6 +16,7 @@ use crate::base::graph::GraphGnn;
 use crate::config::Config;
 use crate::ingest;
 use crate::llm;
+use crate::retrieval::cache::QueryCache;
 use crate::tick;
 
 #[derive(Serialize)]
@@ -45,6 +46,10 @@ pub struct Server {
 	pub save_fn: Arc<dyn Fn() + Send + Sync>,
 	pub task_q: Option<Arc<tick::queue::Queue>>,
 	pub cfg: Arc<Config>,
+	/// Semantic cache over answered queries. Shared, so it is wrapped in a
+	/// `Mutex`; lookups/inserts are brief (a linear scan of a small bounded
+	/// ring). See [`crate::retrieval::cache`].
+	pub cache: Arc<Mutex<QueryCache>>,
 }
 
 impl Server {

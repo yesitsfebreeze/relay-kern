@@ -3,6 +3,7 @@ use crate::base::graph::GraphGnn;
 use crate::base::search::{find_reason, find_entity};
 use crate::base::util;
 use crate::config::RetrievalConfig;
+use crate::profile::Profiler;
 use crate::retrieval::expand::{self, PathChain, ScoredEntity};
 use crate::retrieval::score::{self, QueryOptions};
 use crate::retrieval::seed::{self, Mode, Weights};
@@ -26,11 +27,76 @@ pub fn query(
 	embedder_fn: Option<&crate::retrieval::EmbedFunc>,
 	opts: Option<QueryOptions>,
 ) -> QueryResult {
+	let (result, profile) = query_profiled(g, cfg, query_vec, query_text, mode, llm, embedder_fn, opts);
+	tracing::debug!(target: "kern.profile", "{}", profile);
+	result
+}
+
+/// As [`query`], but returns the stage-level [`crate::profile::Profile`] so
+/// callers (`kern profile`) can render the timing breakdown instead of only
+/// logging it at debug level.
+#[allow(clippy::too_many_arguments)]
+pub fn query_profiled(
+	g: &GraphGnn,
+	cfg: &RetrievalConfig,
+	query_vec: &[f64],
+	query_text: &str,
+	mode: Mode,
+	llm: Option<&LlmFunc>,
+	embedder_fn: Option<&crate::retrieval::EmbedFunc>,
+	opts: Option<QueryOptions>,
+) -> (QueryResult, crate::profile::Profile) {
+	let mut prof = Profiler::new("query");
 	let w = Weights::for_mode(cfg, mode);
 
 	let fused_qvec = hyde::expand_query(cfg, llm, embedder_fn, query_vec, query_text);
-	let qvec: &[f64] = &fused_qvec;
+	prof.checkpoint("hyde");
 
+	let Retrieved { mut results, chains, chain_text } =
+		retrieve(g, cfg, &fused_qvec, query_text, mode, opts.as_ref(), w);
+	prof.checkpoint("retrieve");
+
+	rerank::llm_rerank(cfg, llm, query_text, &mut results);
+	prof.checkpoint("rerank");
+
+	score::commit_access(&mut results);
+
+	let answer = synthesize(&chain_text, &results, query_text, llm);
+	prof.checkpoint("answer");
+
+	(
+		QueryResult { answer, entities: results, path_chains: chains },
+		prof.finish(),
+	)
+}
+
+/// Output of the lock-scoped graph phase: the scored results, their path chains,
+/// and the chains pre-rendered to text. `chain_text` is materialized here, while
+/// the graph lock is held, so the answer prompt can be built afterward without
+/// touching the graph again — letting the caller release the lock before the LLM.
+pub struct Retrieved {
+	pub results: Vec<ScoredEntity>,
+	pub chains: Vec<PathChain>,
+	pub chain_text: String,
+}
+
+/// The graph-only half of retrieval: seed → expand → merge → score → diversify,
+/// plus rendering the path chains to text. **No LLM, no answer synthesis** — so a
+/// caller can hold the graph lock for exactly this (sub-millisecond) phase and run
+/// the expensive HyDE/rerank/answer LLM stages lock-free. Holding the read lock
+/// across a multi-second LLM call is what let a single slow `answer:true` query
+/// starve every worker (blocking writers pile up behind the long-held read lock)
+/// and trip the 30s watchdog; scoping the lock to this function removes that.
+#[allow(clippy::too_many_arguments)]
+pub fn retrieve(
+	g: &GraphGnn,
+	cfg: &RetrievalConfig,
+	qvec: &[f64],
+	query_text: &str,
+	mode: Mode,
+	opts: Option<&QueryOptions>,
+	w: Weights,
+) -> Retrieved {
 	let lexical = g.lexical();
 	let lex_ref = lexical.as_deref();
 	let dense_seeds = seed::seed(g, cfg, qvec, query_text, cfg.seed_k, mode, lex_ref);
@@ -80,48 +146,94 @@ pub fn query(
 	};
 
 	if seeds.is_empty() {
-		return QueryResult {
-			answer: String::new(),
-			entities: Vec::new(),
-			path_chains: Vec::new(),
-		};
+		return Retrieved { results: Vec::new(), chains: Vec::new(), chain_text: String::new() };
 	}
 
 	let expanded = expand::expand(g, cfg, qvec, &seeds, w);
-
 	let mut results = merge::merge(g, &seeds, expanded.scored);
 	let chains = expanded.chains;
 
 	score::apply_boosts(cfg, &mut results);
 	score::filter_delivery(cfg, &mut results);
 
-	if let Some(ref opts) = opts {
+	if let Some(opts) = opts {
 		score::apply_query_options(&mut results, opts);
 	}
 
 	diversify::dedup_by_section(cfg, &mut results);
 	diversify::mmr(cfg, qvec, &mut results);
 
-	rerank::llm_rerank(cfg, llm, query_text, &mut results);
+	let chain_text = format_chains(g, &chains);
+	Retrieved { results, chains, chain_text }
+}
 
-	score::commit_access(&mut results);
-
-	let answer = if !query_text.is_empty() {
-		if let Some(llm_fn) = llm {
-			let prompt = build_answer_prompt(g, &chains, &results, query_text);
+/// Build the answer prompt and run the LLM. Takes the pre-rendered `chain_text`
+/// (and the results' own entity copies) so it needs no graph access — callable
+/// after the graph lock is released. Empty when there is no query or no LLM.
+pub fn synthesize(
+	chain_text: &str,
+	scored: &[ScoredEntity],
+	query_text: &str,
+	llm: Option<&LlmFunc>,
+) -> String {
+	if query_text.is_empty() {
+		return String::new();
+	}
+	match llm {
+		Some(llm_fn) => {
+			let prompt = answer_prompt_from(chain_text, scored, query_text);
 			llm_fn(&prompt)
-		} else {
-			String::new()
 		}
-	} else {
-		String::new()
+		None => String::new(),
+	}
+}
+
+/// Retrieval against an `RwLock<GraphGnn>` that holds the read lock for **only**
+/// the graph phase. HyDE, rerank, and answer synthesis — every multi-second LLM
+/// call — run with the lock released, so a slow cloud model can no longer pin the
+/// read lock long enough to starve writers and trip the watchdog. The daemon's
+/// MCP query path uses this; the plain [`query`]/[`query_profiled`] still serve
+/// the one-shot CLI, which holds no long-lived lock.
+#[allow(clippy::too_many_arguments)]
+pub fn query_locked(
+	graph: &std::sync::RwLock<GraphGnn>,
+	cfg: &RetrievalConfig,
+	query_vec: &[f64],
+	query_text: &str,
+	mode: Mode,
+	llm: Option<&LlmFunc>,
+	embedder_fn: Option<&crate::retrieval::EmbedFunc>,
+	opts: Option<QueryOptions>,
+) -> (QueryResult, u64) {
+	let w = Weights::for_mode(cfg, mode);
+
+	// HyDE LLM call — graph-free, so do it before taking any lock.
+	let fused_qvec = hyde::expand_query(cfg, llm, embedder_fn, query_vec, query_text);
+
+	// Lock held for exactly the graph phase (sub-millisecond). Capture the
+	// mutation epoch under the SAME lock so the result and its version stamp are
+	// consistent: if a write lands during the lock-free LLM phase below, the epoch
+	// advances and a cache entry stamped with this (now-stale) epoch will miss —
+	// preserving the never-serve-stale guarantee despite releasing the lock.
+	let (mut retrieved, epoch) = {
+		let g = crate::base::locks::read_recovered(graph);
+		let r = retrieve(&g, cfg, &fused_qvec, query_text, mode, opts.as_ref(), w);
+		(r, g.mutation_epoch())
 	};
 
-	QueryResult {
-		answer,
-		entities: results,
-		path_chains: chains,
-	}
+	// LLM stages run with the lock released.
+	rerank::llm_rerank(cfg, llm, query_text, &mut retrieved.results);
+	score::commit_access(&mut retrieved.results);
+	let answer = synthesize(&retrieved.chain_text, &retrieved.results, query_text, llm);
+
+	(
+		QueryResult {
+			answer,
+			entities: retrieved.results,
+			path_chains: retrieved.chains,
+		},
+		epoch,
+	)
 }
 
 pub fn build_answer_prompt(
@@ -130,10 +242,20 @@ pub fn build_answer_prompt(
 	scored: &[ScoredEntity],
 	query_text: &str,
 ) -> String {
+	answer_prompt_from(&format_chains(g, chains), scored, query_text)
+}
+
+/// Assemble the answer prompt from a pre-rendered `chain_text` and the scored
+/// results' own entity copies — no graph access, so it runs after the lock is
+/// released. [`build_answer_prompt`] is the graph-taking convenience wrapper.
+pub fn answer_prompt_from(
+	chain_text: &str,
+	scored: &[ScoredEntity],
+	query_text: &str,
+) -> String {
 	let mut prompt = String::from("Context from knowledge graph:\n\n");
-	let chain_text = format_chains(g, chains);
 	if !chain_text.is_empty() {
-		prompt.push_str(&chain_text);
+		prompt.push_str(chain_text);
 		prompt.push('\n');
 	}
 	prompt.push_str("Relevant facts:\n");
@@ -161,10 +283,12 @@ pub fn format_chains(g: &GraphGnn, chains: &[PathChain]) -> String {
 					out.push_str(&format!("  [Entity] {text}\n"));
 				}
 			} else if let Some((r, _)) = find_reason(g, node_id) {
-				let label = if r.text.is_empty() {
-					format!("{:?}", r.kind)
-				} else {
+				let label = if !r.text.is_empty() {
 					util::truncate(&r.text, 100).to_string()
+				} else if let Some(lbl) = r.kind.fallback_label() {
+					lbl.to_string()
+				} else {
+					continue
 				};
 				out.push_str(&format!("  --{label}-->\n"));
 			}

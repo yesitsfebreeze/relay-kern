@@ -62,3 +62,57 @@ pub(crate) fn handle_prompt_get(id: Option<Box<RawValue>>, params: Option<Box<Ra
 		),
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn raw(v: serde_json::Value) -> Box<RawValue> {
+		serde_json::value::to_raw_value(&v).unwrap()
+	}
+
+	/// Pull the prompt message text out of a successful response.
+	fn message_text(resp: &Response) -> String {
+		resp.result.as_ref().expect("result present")["messages"][0]["content"]["text"]
+			.as_str()
+			.expect("text content")
+			.to_string()
+	}
+
+	#[test]
+	fn happy_path_embeds_topic_in_message() {
+		let params = raw(serde_json::json!({
+			"name": "research",
+			"arguments": { "topic": "borrow checker" },
+		}));
+		let resp = handle_prompt_get(None, Some(params));
+		assert!(resp.error.is_none(), "no error on valid request");
+		assert!(message_text(&resp).contains("borrow checker"));
+	}
+
+	#[test]
+	fn missing_params_is_invalid_request() {
+		let resp = handle_prompt_get(None, None);
+		let err = resp.error.as_ref().expect("error present");
+		assert_eq!(err.code, ERR_INVALID_REQ);
+	}
+
+	#[test]
+	fn unknown_prompt_name_is_not_found() {
+		let params = raw(serde_json::json!({ "name": "no_such_prompt" }));
+		let resp = handle_prompt_get(None, Some(params));
+		let err = resp.error.as_ref().expect("error present");
+		assert_eq!(err.code, ERR_NOT_FOUND);
+	}
+
+	#[test]
+	fn empty_topic_is_rejected() {
+		let params = raw(serde_json::json!({
+			"name": "research",
+			"arguments": { "topic": "" },
+		}));
+		let resp = handle_prompt_get(None, Some(params));
+		let err = resp.error.as_ref().expect("error present");
+		assert_eq!(err.code, ERR_INVALID_REQ);
+	}
+}

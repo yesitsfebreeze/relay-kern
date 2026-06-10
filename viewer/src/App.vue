@@ -1,13 +1,13 @@
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import { ref, shallowRef, computed, onMounted, onBeforeUnmount, nextTick, watch, defineAsyncComponent } from 'vue'
 import KernIcon from './KernIcon.vue'
-import InboxPane from './components/InboxPane.vue'
-import ConvPane from './components/ConvPane.vue'
-import ProvPane from './components/ProvPane.vue'
-import RelationsPane from './components/RelationsPane.vue'
-import GraphPane from './components/GraphPane.vue'
-import FlowPane from './components/FlowPane.vue'
-import SettingsPane from './components/SettingsPane.vue'
+const InboxPane     = defineAsyncComponent(() => import('./components/InboxPane.vue'))
+const ConvPane      = defineAsyncComponent(() => import('./components/ConvPane.vue'))
+const ProvPane      = defineAsyncComponent(() => import('./components/ProvPane.vue'))
+const RelationsPane = defineAsyncComponent(() => import('./components/RelationsPane.vue'))
+const GraphPane     = defineAsyncComponent(() => import('./components/GraphPane.vue'))
+const FlowPane      = defineAsyncComponent(() => import('./components/FlowPane.vue'))
+const SettingsPane  = defineAsyncComponent(() => import('./components/SettingsPane.vue'))
 
 // ── Constants ──
 const ACCENTS = ['#CF5320', '#C2410C', '#B8455C', '#4F7A8C', '#5E7D5A', '#6D5B8A']
@@ -21,22 +21,22 @@ const mkTab = (kind, convId) => ({ kind, convId })
 function now() { const d = new Date(); return d.getHours()+':'+String(d.getMinutes()).padStart(2,'0') }
 
 // ── State ──
-const thoughts = ref({})
-const reasons = ref({})
+const thoughts = shallowRef({})
+const reasons = shallowRef({})
 const convs = ref([])
 const query = ref('')
 const columns = ref([
   { id: 'c1', w: 3, rows: [
-    { key: 't11', flex: 1, active: 0, tabs: [mkTab('inbox')] },
-    { key: 't12', flex: 1, active: 0, tabs: [mkTab('relations')] },
+    { key: 't11', flex: 1, active: 0, tabs: [mkTab('inbox')], note: 'your home surface — always one keystroke away' },
+    { key: 't12', flex: 1, active: 0, tabs: [mkTab('relations')], note: 'the map of connections between your thoughts' },
   ]},
   { id: 'c2', w: 4, rows: [
-    { key: 't21', flex: 1, active: 0, tabs: [mkTab('conv')] },
-    { key: 't22', flex: 1, active: 0, tabs: [mkTab('flow')] },
+    { key: 't21', flex: 1, active: 0, tabs: [mkTab('conv')], note: 'conversations grounded in your memory' },
+    { key: 't22', flex: 1, active: 0, tabs: [mkTab('flow')], note: 'how your thinking connects step by step' },
   ]},
   { id: 'c3', w: 3, rows: [
-    { key: 't31', flex: 1, active: 0, tabs: [mkTab('graph')] },
-    { key: 't32', flex: 1, active: 0, tabs: [mkTab('prov')] },
+    { key: 't31', flex: 1, active: 0, tabs: [mkTab('graph')], note: 'the full graph of what you know and why' },
+    { key: 't32', flex: 1, active: 0, tabs: [mkTab('prov')], note: 'before · after — kern\'s reasoning surface' },
   ]},
 ])
 const focusKey = ref('t21')
@@ -59,18 +59,27 @@ const wmRef = ref(null)
 let pulse = null
 let historyMap = {}
 
+// Immutably patch one conversation by id; patchMsg also targets one message within it.
+function patchConv(cid, fn) {
+  convs.value = convs.value.map(c => c.id === cid ? fn(c) : c)
+}
+function patchMsg(cid, rid, fn) {
+  patchConv(cid, c => ({ ...c, messages: c.messages.map(m => m.id === rid ? fn(m) : m) }))
+}
+
 async function loadGraph() {
   try {
     const g = await fetch('/graph').then(r => r.json())
     const ts = {}
     for (const n of g.nodes || []) {
-      ts[n.id] = { id: n.id, text: n.text || n.label || n.id }
+      ts[n.id] = { id: n.id, text: n.label || n.text || n.id, heat: n.heat || 0, conf: n.conf || 0 }
     }
     const rs = {}
     for (const l of g.links || []) {
       const src = typeof l.source === 'object' ? l.source.id : l.source
       const tgt = typeof l.target === 'object' ? l.target.id : l.target
-      rs[l.id] = { id: l.id, from: src, to: tgt, why: l.text || l.label || l.why || '' }
+      const id = l.id || `${src}→${tgt}`
+      rs[id] = { id, from: src, to: tgt, why: l.text || '' }
     }
     thoughts.value = ts
     reasons.value = rs
@@ -84,8 +93,8 @@ async function sendMessage(cid) {
   if (!txt) return
   const uid_u = uid('u'), uid_r = uid('k')
   const userMsg = { id: uid_u, role: 'you', when: now(), text: [txt] }
-  const kernReply = { id: uid_r, role: 'kern', when: now(), text: [''], retrieved: [], used: [], usedReasons: [] }
-  convs.value = convs.value.map(c => c.id === cid ? { ...c, status: 'thinking', unread: false, messages: [...(c.messages||[]), userMsg, kernReply] } : c)
+  const kernReply = { id: uid_r, role: 'kern', when: now(), text: [''], retrieved: [], used: [], usedReasons: [], toolCalls: [] }
+  patchConv(cid, c => ({ ...c, status: 'thinking', unread: false, messages: [...(c.messages||[]), userMsg, kernReply] }))
   composeBy.value = { ...composeBy.value, [cid]: '' }
   busyConv.value = cid
   const hist = historyMap[cid] || []
@@ -114,7 +123,7 @@ async function sendMessage(cid) {
     const reply = convs.value.find(c => c.id === cid)?.messages?.find(m => m.id === uid_r)
     if (reply) hist.push({ role: 'assistant', content: reply.text.join('\n') })
     historyMap[cid] = hist
-    convs.value = convs.value.map(c => c.id === cid ? { ...c, status: 'replied', unread: false } : c)
+    patchConv(cid, c => ({ ...c, status: 'replied', unread: false }))
   } catch (_) {
     // fallback: synthesize a reply from local thoughts
     const words = txt.toLowerCase().split(/\W+/).filter(w => w.length > 3)
@@ -127,10 +136,10 @@ async function sendMessage(cid) {
     const replyText = bestTh
       ? [`Here's what I'm drawing on. The closest thing in your memory is: "${bestTh.text}"`, "Held against that, I'd stay true to it rather than chase the louder option — and if you disagree, edit the thought and send this back through."]
       : ["No relevant memory found yet. Ingest some thoughts first."]
-    convs.value = convs.value.map(c => c.id === cid ? {
+    patchConv(cid, c => ({
       ...c, status: 'replied', unread: false,
       messages: c.messages.map(m => m.id === uid_r ? { ...m, text: replyText, retrieved, used, usedReasons: [] } : m)
-    } : c)
+    }))
   } finally {
     busyConv.value = null
     focusReplyBy.value = { ...focusReplyBy.value, [cid]: uid_r }
@@ -156,17 +165,15 @@ function applyFrame(frame, cid, rid) {
         reasons.value = { ...reasons.value, [r.id]: { id: r.id, from: r.from || '', to: r.to || '', why: r.text || r.why || '' } }
       }
     }
-    convs.value = convs.value.map(c => c.id === cid ? {
-      ...c, messages: c.messages.map(m => m.id === rid ? { ...m, retrieved, used, usedReasons } : m)
-    } : c)
+    patchMsg(cid, rid, m => ({ ...m, retrieved, used, usedReasons }))
   } else if (ev === 'token') {
-    convs.value = convs.value.map(c => c.id === cid ? {
-      ...c, messages: c.messages.map(m => m.id === rid ? { ...m, text: m.text.length === 1 && m.text[0] === '' ? [d.t || ''] : [m.text.slice(0,-1).join('\n') + (d.t || '')] } : m)
-    } : c)
+    patchMsg(cid, rid, m => ({ ...m, text: m.text.length === 0 ? [d.t||''] : [...m.text.slice(0,-1), (m.text[m.text.length-1]||'')+(d.t||'')] }))
   } else if (ev === 'error') {
-    convs.value = convs.value.map(c => c.id === cid ? {
-      ...c, messages: c.messages.map(m => m.id === rid ? { ...m, text: [...m.text, `⚠ ${d.message || 'error'}`] } : m)
-    } : c)
+    patchMsg(cid, rid, m => ({ ...m, text: [...m.text, `⚠ ${d.message || 'error'}`] }))
+  } else if (ev === 'tool_call') {
+    patchMsg(cid, rid, m => ({ ...m, toolCalls: [...(m.toolCalls || []), { name: d.name, args: d.args, idx: d.idx, result: null, ok: null }] }))
+  } else if (ev === 'tool_result') {
+    patchMsg(cid, rid, m => ({ ...m, toolCalls: (m.toolCalls || []).map(tc => tc.idx === d.idx ? { ...tc, result: d.result, ok: d.ok } : tc) }))
   }
 }
 
@@ -285,8 +292,8 @@ function moveV(dir) {
 let addrBuf = { col: null, t: 0 }
 function pressDigit(d) {
   const now2 = Date.now()
-  if (addrBuf.col && now2 - addrBuf.t < 850 && (d === 1 || d === 2)) {
-    focusColRow(addrBuf.col - 1, d - 1)
+  if (addrBuf.col === d && now2 - addrBuf.t < 850) {
+    focusColRow(d - 1, 1)
     addrBuf = { col: null, t: 0 }
   } else if (d >= 1 && d <= 3) {
     focusColRow(d - 1, 0)
@@ -591,7 +598,7 @@ watch(accent, (v) => { document.documentElement.style.setProperty('--ember', v) 
 // ── Lifecycle ──
 onMounted(() => {
   loadGraph()
-  pulse = setInterval(loadGraph, 5000)
+  pulse = setInterval(loadGraph, 30000)
   window.addEventListener('keydown', onKey)
 })
 onBeforeUnmount(() => {
@@ -661,7 +668,10 @@ const flatTiles = computed(() =>
               <!-- Tile header -->
               <header class="tile-bar">
                 <span class="tile-addr">
-                  {{ (ci+1)+'.'+( ri+1) }}
+                  {{ (ci+1)+'.'+(ri+1) }}
+                  <span v-if="row.note" class="tile-note">
+                    <span class="nh">remembered</span>{{ row.note }}
+                  </span>
                 </span>
                 <div class="tile-tabs">
                   <button
@@ -725,10 +735,17 @@ const flatTiles = computed(() =>
                     :resent="resent"
                     :busy="busyConv"
                     :compose="composeBy[row.tabs[row.active].convId] || ''"
+                    :thoughts="thoughts"
+                    :editing="editing"
+                    :draft="draft"
                     @setFocusReply="rid => { focusReplyBy = {...focusReplyBy, [row.tabs[row.active].convId]: rid}; activeConv = row.tabs[row.active].convId }"
                     @setCompose="v => composeBy = {...composeBy, [row.tabs[row.active].convId]: v}"
                     @send="sendMessage(row.tabs[row.active].convId)"
                     @resend="resendReply"
+                    @startEdit="startEdit"
+                    @save="editSave"
+                    @cancel="editCancel"
+                    @setDraft="v => draft = v"
                   />
                   <!-- launcher if no conv selected -->
                   <div v-else class="launcher">
@@ -892,7 +909,7 @@ const flatTiles = computed(() =>
         </button>
       </div>
       <span class="grow"></span>
-      <span class="sb-hint"><b>1–3</b> then <b>1/2</b> address · <b>alt+←↑↓→</b> move · <b>alt+t</b> tab · <b>alt+s</b> split · <b>alt+n</b> new · <b>alt+w</b> close</span>
+      <span class="sb-hint"><b>1/2/3</b> col · <b>11/22/33</b> 2nd row ·<b>alt+←↑↓→</b> move · <b>alt+t</b> tab · <b>alt+s</b> split · <b>alt+n</b> new · <b>alt+w</b> close</span>
     </footer>
   </div>
 </template>

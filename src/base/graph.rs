@@ -61,6 +61,20 @@ pub struct GraphGnn {
 	/// would exceed this, the LRU (oldest `last_access`) non-root kern is
 	/// `unload`ed to disk. `usize::MAX` disables the cap.
 	max_loaded_kerns: usize,
+	/// Monotonic graph-wide mutation counter, bumped on every content mutation:
+	/// a kern handed out mutably (`get_mut`), registered, or deregistered. The
+	/// query result cache stamps each entry with the epoch at creation and treats
+	/// the entry as valid only while the epoch is unchanged.
+	///
+	/// A *global* epoch rather than per-kern versions is deliberate and required
+	/// for soundness: HyDE rewrites the query before search, so retrieval reaches
+	/// kerns far from the raw query vector. A new memory landing in a kern the
+	/// previous run never touched would be invisible to any per-kern dependency
+	/// set, so that query would keep serving a result omitting it. Invalidating on
+	/// *any* mutation removes that hole — between writes the cache hits fully; a
+	/// write conservatively flushes it. Runtime-only (never serialised); the read/
+	/// query path takes `&GraphGnn` and so can never bump it — only mutations do.
+	mutation_epoch: u64,
 }
 
 impl Default for GraphGnn {
@@ -93,6 +107,7 @@ impl GraphGnn {
 			reason_kern: HashMap::new(),
 			lexical: Some(Arc::new(LexicalIndex::new_in_ram(1.2, 0.75))),
 			max_loaded_kerns: usize::MAX,
+			mutation_epoch: 0,
 		}
 	}
 
@@ -184,12 +199,31 @@ impl GraphGnn {
 		if !self.kerns.contains_key(id) {
 			self.get(id);
 		}
+		if self.kerns.contains_key(id) {
+			// Conservatively bump: a caller asking for `&mut Kern` is presumed to
+			// mutate it. Over-bumping (a get_mut that changes nothing) only costs a
+			// cache flush; it never serves stale data. Heat/access updates run on
+			// result copies, not through here, so the read path never bumps.
+			self.bump_mutation_epoch();
+		}
 		if let Some(k) = self.kerns.get_mut(id) {
 			k.last_access = Some(SystemTime::now());
 			Some(k)
 		} else {
 			None
 		}
+	}
+
+	/// Advance the graph-wide mutation epoch. The query cache compares the stamped
+	/// epoch against the live one to invalidate every entry on any change.
+	pub fn bump_mutation_epoch(&mut self) {
+		self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+	}
+
+	/// Current graph mutation epoch. A query-cache entry is valid only while this
+	/// equals the epoch captured when the entry was stored.
+	pub fn mutation_epoch(&self) -> u64 {
+		self.mutation_epoch
 	}
 
 	pub fn register(&mut self, kern: Kern) {
@@ -201,6 +235,7 @@ impl GraphGnn {
 			self.reason_kern.insert(r.id.clone(), kid.clone());
 		}
 		self.unloaded.remove(&kid);
+		self.bump_mutation_epoch();
 		self.kerns.insert(kid, kern);
 		self.enforce_kern_cap();
 	}
@@ -264,6 +299,8 @@ impl GraphGnn {
 		}
 		self.kerns.remove(id);
 		self.unloaded.remove(id);
+		// Removal is a mutation too — flush the cache.
+		self.bump_mutation_epoch();
 		// Delete the on-disk file too. `load_dir` reads every `*.kern` as a live
 		// kern, so a deregistered kern whose file lingers resurrects on the next
 		// start — the leak that let reaped empty kerns persist by the thousand.
@@ -438,6 +475,7 @@ impl GraphGnn {
 			reason_kern: HashMap::new(),
 			lexical: Some(Arc::new(LexicalIndex::new_in_ram(1.2, 0.75))),
 			max_loaded_kerns: usize::MAX,
+			mutation_epoch: 0,
 		};
 		g.rebuild_index();
 		if let Some(lex) = g.lexical.clone() {

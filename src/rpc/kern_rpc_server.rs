@@ -25,6 +25,7 @@ use trnsprt::kern_rpc::{
     AnchorReq, AnchorRes, IngestRes, KernRpc, LinkReq, LinkRes, NeighborsReq, NeighborsRes,
     PulseReq, PulseRes, QueryReq, QueryRes, SourceLite, TruncateAfterReq, TruncateAfterRes,
 };
+use trnsprt::search::EdgeRef;
 use trnsprt::typed::{Channel, JsonEnvelopeCodec, LocalListener};
 use trnsprt::McpServer;
 
@@ -242,6 +243,30 @@ impl KernRpc for KernRpcHandler {
                         .and_then(|v| v.as_str())
                         .map(parse_status_label)
                         .unwrap_or(EntityStatusLite::Active);
+                    // Extract enriched relationship edges from the MCP
+                    // tool_query envelope so RPC callers see WHY entities
+                    // are connected, not just THAT they are.
+                    let edges: Vec<EdgeRef> = e
+                        .get("edges")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|edge| {
+                                    let text = str_field(edge, "text", "");
+                                    if text.is_empty() {
+                                        return None; // skip unenriched
+                                    }
+                                    Some(EdgeRef {
+                                        from: str_field(edge, "from", ""),
+                                        to: str_field(edge, "to", ""),
+                                        kind: EdgeKind::References, // kind int→EdgeKind mapping not 1:1; use References as neutral wire value
+                                        text,
+                                        score: f32_field(edge, "score"),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     hits.push(EntityRef {
                         id,
                         kind,
@@ -250,6 +275,7 @@ impl KernRpc for KernRpcHandler {
                         label,
                         snippet,
                         score,
+                        edges,
                     });
                 }
             }
@@ -446,6 +472,7 @@ impl KernRpc for KernRpcHandler {
                     label,
                     snippet,
                     score,
+                    edges: vec![],
                 });
             }
             NeighborsRes { neighbors }

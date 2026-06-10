@@ -9,11 +9,61 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 // ── tunables ──────────────────────────────────────────────────────────────
-export const TOP_K        = 6;     // hits to ask kern for
-export const MAX_INJECT   = 5;     // hits to actually inject
-export const MIN_SCORE    = 0.6;   // drop weaker hits (kern scores ~0.0–1.0)
-export const MIN_PROMPT   = 4;     // skip trivially short prompts
-export const TIMEOUT_MS   = 2500;  // hard bound; slow kern = inject nothing
+export const TOP_K          = 6;     // hits to ask kern for
+export const MAX_INJECT     = 5;     // hits to actually inject
+export const MIN_SCORE      = 0.85;  // drop weaker hits (kern scores ~0.0–1.0)
+export const MIN_PROMPT     = 4;     // skip trivially short prompts
+export const TIMEOUT_MS     = 2500;  // hard bound; slow kern = inject nothing
+export const MIN_OVERLAP    = 2;     // word overlap with digest required to spawn kern
+
+// ── digest pre-check (pure, testable) ────────────────────────────────────
+
+const STOPWORDS = new Set([
+  'the','a','an','is','are','was','were','in','on','at','to','for','of',
+  'and','or','but','it','we','i','you','he','she','they','this','that',
+  'with','be','have','do','not','can','will','would','could','should',
+  'from','by','as','if','so','no','yes','its','our','your','their',
+  'also','just','get','got','use','used','can','has','had','been',
+]);
+
+/** Extract meaningful lowercase words (3+ chars, not stopwords). */
+export function contentWords(text) {
+  return new Set(
+    (text.toLowerCase().match(/\b[a-z]{3,}\b/g) ?? []).filter((w) => !STOPWORDS.has(w)),
+  );
+}
+
+/** Parse anchor names from digest header line `Anchors: foo, bar`. */
+export function parseAnchors(digest) {
+  const m = digest.match(/^Anchors:\s*(.+)$/m);
+  if (!m) return [];
+  return m[1].split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+
+/**
+ * Returns true if the prompt has enough overlap with digest content to
+ * warrant spawning kern search. Two signals:
+ *   1. Any anchor name appears as a substring in the prompt (exact).
+ *   2. At least MIN_OVERLAP content words are shared.
+ */
+export function shouldSearch(prompt, digest, minOverlap = MIN_OVERLAP) {
+  if (!digest) return false;
+  const lp = prompt.toLowerCase();
+
+  // Anchor hit → always search.
+  for (const anchor of parseAnchors(digest)) {
+    if (anchor && lp.includes(anchor)) return true;
+  }
+
+  // Word overlap.
+  const digestWords = contentWords(digest);
+  const promptWords = contentWords(prompt);
+  let overlap = 0;
+  for (const w of promptWords) {
+    if (digestWords.has(w) && ++overlap >= minOverlap) return true;
+  }
+  return false;
+}
 
 // ── pure helpers (testable) ───────────────────────────────────────────────
 
@@ -92,9 +142,14 @@ async function main() {
   const prompt = typeof ev.prompt === 'string' ? ev.prompt.trim() : '';
   if (prompt.length < MIN_PROMPT) return;
 
-  // Opt-in guard: only recall in projects with a `.kern` store. Keeps this
-  // global hook silent (and cheap) everywhere kern is not active.
-  if (!fs.existsSync(path.join(cwd, '.kern'))) return;
+  // Opt-in guard: only recall in projects with a `.kern` store.
+  const kernDir = path.join(cwd, '.kern');
+  if (!fs.existsSync(kernDir)) return;
+
+  // Fast pre-check: read digest and test word/anchor overlap before spawning kern.
+  let digest = '';
+  try { digest = fs.readFileSync(path.join(kernDir, 'digest.md'), 'utf8'); } catch {}
+  if (!shouldSearch(prompt, digest)) return;
 
   const stdout = await kernSearch(prompt, cwd);
   const out = buildOutput(buildContext(parseHits(stdout)));

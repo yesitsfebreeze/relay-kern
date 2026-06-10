@@ -14,7 +14,7 @@ use super::locomo::{self, Sample};
 use crate::base::graph::GraphGnn;
 use crate::base::types::{EntityKind, Source};
 use crate::config::RetrievalConfig;
-use crate::ingest::distill::distill;
+use crate::ingest::distill;
 use crate::ingest::{Config, Worker};
 use crate::llm::{Client as LlmClient, Endpoint};
 use crate::retrieval::answer;
@@ -171,19 +171,55 @@ pub async fn run_eval(cfg: &EvalConfig) -> Result<EvalReport, String> {
 
 	let mut report = EvalReport::new();
 
-	for sample in samples.iter().take(take) {
+	for (i, sample) in samples.iter().take(take).enumerate() {
+		eprintln!("[{}/{}] ingesting {} ...", i + 1, take, sample.sample_id);
 		// Fresh graph per dialogue: LoCoMo dialogues are independent personas.
 		let graph: Arc<RwLock<GraphGnn>> = Arc::new(RwLock::new(GraphGnn::new()));
 		let worker = Worker::new(graph.clone(), client.clone(), Some(llm.clone()), None);
 
-		report.total_claims += ingest_sample(&worker, &llm, sample, &icfg).await;
+		let claims = ingest_sample(&worker, &llm, sample, &icfg).await;
+		eprintln!("[{}/{}] ingested {claims} claims, running {} QA probes ...", i + 1, take, sample.qa.len());
+		report.total_claims += claims;
 		report.n_samples += 1;
 
 		eval_sample(&graph, &client, &judge, &llm, &embed_fn, &rcfg, sample, cfg.max_qa_per_sample, &mut report)
 			.await;
+		eprintln!("[{}/{}] done (total queries so far: {})", i + 1, take, report.n_queries);
 	}
 
 	Ok(report)
+}
+
+/// LoCoMo-specific distill: extracts durable personal facts from social dialogue.
+/// Uses the same wire protocol as `distill` (returns None on LLM outage, Some([])
+/// when nothing is worth keeping) but prompts for personal/episodic knowledge
+/// instead of coding-assistant knowledge.
+fn distill_locomo(conversation: &str, llm: &dyn Fn(&str) -> String) -> Option<Vec<distill::Claim>> {
+	if conversation.trim().is_empty() {
+		return Some(Vec::new());
+	}
+	let prompt = format!(
+		"Extract durable, reusable personal facts from this social dialogue. \
+Output ONLY a JSON array. Each element: \
+{{\"text\": \"<one self-contained statement>\", \"kind\": \"<one of: preference, \
+decision, project, fact, reference, procedural>\"}}.\n\
+Rules:\n\
+- Dates are first-class. When an event has a specific date, ALWAYS embed it in \
+the claim (e.g. \"Caroline attended an LGBTQ support group on 7 May 2023\", \
+not \"Caroline attends an LGBTQ support group\").\n\
+- Also extract non-dated facts: personality traits, skills, hobbies, job, \
+health, relationships, opinions, plans — anything that would help answer \
+future questions about this person.\n\
+- Each claim is self-contained: include the person's name and full context.\n\
+- ONE claim per distinct fact. Skip greetings and filler.\n\
+If nothing is worth keeping, output []. No markdown wrapping.\n\n\
+DIALOGUE:\n{conversation}\n"
+	);
+	let raw = llm(&prompt);
+	if raw.trim().is_empty() {
+		return None;
+	}
+	Some(distill::parse_claims(&raw))
 }
 
 /// Distill each session and ingest every claim through the canonical worker.
@@ -198,7 +234,7 @@ async fn ingest_sample(worker: &Worker, llm: &LlmFunc, sample: &Sample, icfg: &C
 			convo.push_str(&t.text);
 			convo.push('\n');
 		}
-		let claims = match distill(&convo, llm.as_ref()) {
+		let claims = match distill_locomo(&convo, llm.as_ref()) {
 			Some(c) => c,
 			None => continue, // LLM outage on this session; skip
 		};
@@ -298,5 +334,68 @@ mod tests {
 		let r = EvalReport::new();
 		let s = r.summary();
 		assert!(s.contains("category"));
+	}
+
+	#[test]
+	fn summary_with_data_shows_category_rows() {
+		let mut r = EvalReport::new();
+		r.n_samples = 2;
+		r.n_queries = 4;
+		r.total_claims = 20;
+		r.latencies_ms = vec![10, 20, 80, 120];
+		let mut agg = CatAgg::default();
+		agg.n = 4;
+		agg.f1 = 3.2;
+		agg.rouge = 2.8;
+		agg.judge_correct = 3;
+		r.per_category.insert(0, agg);
+		let s = r.summary();
+		assert!(s.contains("samples: 2"), "samples in header");
+		assert!(s.contains("claims ingested: 20"), "claims in header");
+		assert!(s.contains("avg retrieved context"), "ctx proxy row present");
+	}
+
+	#[test]
+	fn distill_locomo_empty_conversation_returns_empty_vec() {
+		let llm = |_: &str| panic!("LLM should not be called for empty input");
+		assert_eq!(distill_locomo("", &llm), Some(Vec::new()));
+		assert_eq!(distill_locomo("   \n\t  ", &llm), Some(Vec::new()));
+	}
+
+	#[test]
+	fn distill_locomo_llm_outage_returns_none() {
+		// Empty LLM response = outage signal → None so caller skips the session
+		let llm = |_: &str| String::new();
+		assert_eq!(distill_locomo("Alice: Hi there!", &llm), None);
+	}
+
+	#[test]
+	fn distill_locomo_valid_json_returns_claims() {
+		let llm = |_: &str| {
+			r#"[{"text":"Alice prefers tea over coffee","kind":"preference"},{"text":"Alice is a software engineer","kind":"fact"}]"#.to_string()
+		};
+		let claims = distill_locomo("Alice: I prefer tea.", &llm).expect("claims");
+		assert_eq!(claims.len(), 2);
+		assert_eq!(claims[0].text, "Alice prefers tea over coffee");
+		assert_eq!(claims[0].descriptor, "preference");
+		assert_eq!(claims[1].descriptor, "fact");
+	}
+
+	#[test]
+	fn distill_locomo_malformed_json_returns_empty_claims() {
+		// parse_claims is graceful: bad JSON → empty vec, not None
+		let llm = |_: &str| "not json at all".to_string();
+		let claims = distill_locomo("Alice: Hi.", &llm).expect("Some result");
+		assert!(claims.is_empty(), "malformed JSON produces no claims, not outage");
+	}
+
+	#[test]
+	fn distill_locomo_prompt_includes_dialogue_text() {
+		let llm = |p: &str| {
+			assert!(p.contains("Bob: I love Rust."), "dialogue text must be in prompt");
+			assert!(p.contains("DIALOGUE:"), "DIALOGUE marker must be in prompt");
+			"[]".to_string()
+		};
+		distill_locomo("Bob: I love Rust.", &llm);
 	}
 }

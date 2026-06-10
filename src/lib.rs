@@ -35,6 +35,8 @@ pub mod memory_service;
 pub mod metrics;
 /// Model quantisation utilities for reducing LLM memory footprint.
 pub mod quant;
+/// Query profiling and performance measurement.
+pub mod profile;
 /// Interactive REPL for direct kern exploration.
 pub mod repl;
 /// Hybrid vector + BM25 search over the ingested content index.

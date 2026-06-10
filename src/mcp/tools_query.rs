@@ -93,74 +93,123 @@ impl Server {
 			None => return tool_error("no embed client configured"),
 		};
 
-		let vec = match crate::llm::block_on_in_place(llm.embed(&p.text)) {
-			Some(Ok(v)) => v,
-			Some(Err(e)) => return tool_error(&format!("embed failed: {e}")),
-			None => return tool_error("no tokio runtime"),
+		let mode = retrieval::seed::Mode::parse(&p.mode);
+		let answer_on = p.answer;
+		let rcfg = &self.cfg.retrieval;
+
+		// Only the answer path is worth caching — it fires HyDE + synthesis (tens
+		// of seconds); pure vector retrieval is already sub-millisecond. And only
+		// unfiltered, default-sorted queries are cacheable, because a filter or a
+		// non-default sort changes the result set/order while the query vector
+		// stays the same. The `tag` (mode) keeps the three retrieval modes from
+		// colliding on one entry.
+		let cacheable = answer_on
+			&& rcfg.query_cache_cap > 0
+			&& p.kind.is_none()
+			&& p.scheme.is_none()
+			&& p.source.is_empty()
+			&& p.since.is_empty()
+			&& p.before.is_empty()
+			&& p.valid_at.is_empty()
+			&& p.min_conf == 0.0
+			&& p.sort.is_empty()
+			&& !p.ascending;
+		let tag = mode as u64;
+		let text_hash = retrieval::cache::hash_text(&p.text);
+
+		// Exact-text fast path: a verbatim re-ask (same text, same mode, graph
+		// unchanged) returns the cached result WITHOUT even embedding the query —
+		// skipping the embedding round-trip on top of the LLM pipeline. `vec` stays
+		// `None` on this path; cold-tier fill below is guarded on it.
+		let text_hit = if cacheable {
+			let g = crate::base::locks::read_recovered(&self.graph);
+			self.cache.lock().ok().and_then(|mut c| c.lookup_text(&g, text_hash, tag))
+		} else {
+			None
 		};
 
-		let mode = retrieval::seed::Mode::parse(&p.mode);
-
-		let complete = llm.complete_func();
-		let answer_on = p.answer;
-		let llm_fn: LlmFunc = Arc::new(complete);
-
-		let llm_embed = llm.clone();
-		let embed_fn: EmbedFunc = Arc::new(move |s: &str| {
-			match crate::llm::block_on_in_place(llm_embed.embed(s)) {
-				Some(r) => r.map_err(|e| e.to_string()),
-				None => Err("no tokio runtime".to_string()),
-			}
-		});
-
-		let mut opts = retrieval::score::QueryOptions::default();
-		opts.sort = retrieval::score::SortField::parse(&p.sort);
-		opts.ascending = p.ascending;
-		opts.source = p.source;
-		opts.kind = p.kind;
-		if let Some(ref s) = p.scheme {
-			match crate::base::types::Source::parse_scheme(s) {
-				Some(tag) => opts.scheme = Some(tag.to_string()),
-				None => return tool_error(&format!("unknown source scheme: {s}")),
-			}
-		}
-		opts.min_conf = p.min_conf;
-		match parse_time_filter("since", &p.since) {
-			Ok(v) => opts.since = v,
-			Err(e) => return tool_error(&e),
-		}
-		match parse_time_filter("before", &p.before) {
-			Ok(v) => opts.before = v,
-			Err(e) => return tool_error(&e),
-		}
-		match parse_time_filter("valid_at", &p.valid_at) {
-			Ok(v) => opts.valid_at = v,
-			Err(e) => return tool_error(&e),
-		}
-
-		let rcfg = &self.cfg.retrieval;
-		// LLM calls (HyDE expansion, LLM rerank, answer synthesis) only earn
-		// their cost when the caller asked for a synthesized `answer`. With
-		// `answer:false` this stays a fast pure-vector retrieval. Passing the
-		// LLM unconditionally fired several gemma-class generations per query,
-		// overrunning the MCP client timeout (surfaced as a "Connection
-		// closed" -32000 from the proxy).
-		let (llm_arg, embed_arg) = answer_llm_args(answer_on, &llm_fn, &embed_fn);
-		let result = {
-			let g = match self.graph.read() {
-				Ok(g) => g,
-				Err(_) => return tool_error("graph lock poisoned"),
+		let (result, vec): (_, Option<Vec<f64>>) = if let Some(hit) = text_hit {
+			(hit, None)
+		} else {
+			let vec = match crate::llm::block_on_in_place(llm.embed(&p.text)) {
+				Some(Ok(v)) => v,
+				Some(Err(e)) => return tool_error(&format!("embed failed: {e}")),
+				None => return tool_error("no tokio runtime"),
 			};
-			retrieval::answer::query(
-				&g,
-				rcfg,
-				&vec,
-				&p.text,
-				mode,
-				llm_arg,
-				embed_arg,
-				Some(opts),
-			)
+
+			let complete = llm.complete_func();
+			let llm_fn: LlmFunc = Arc::new(complete);
+			let llm_embed = llm.clone();
+			let embed_fn: EmbedFunc = Arc::new(move |s: &str| {
+				match crate::llm::block_on_in_place(llm_embed.embed(s)) {
+					Some(r) => r.map_err(|e| e.to_string()),
+					None => Err("no tokio runtime".to_string()),
+				}
+			});
+
+			let mut opts = retrieval::score::QueryOptions::default();
+			opts.sort = retrieval::score::SortField::parse(&p.sort);
+			opts.ascending = p.ascending;
+			opts.source = p.source;
+			opts.kind = p.kind;
+			if let Some(ref s) = p.scheme {
+				match crate::base::types::Source::parse_scheme(s) {
+					Some(tag) => opts.scheme = Some(tag.to_string()),
+					None => return tool_error(&format!("unknown source scheme: {s}")),
+				}
+			}
+			opts.min_conf = p.min_conf;
+			match parse_time_filter("since", &p.since) {
+				Ok(v) => opts.since = v,
+				Err(e) => return tool_error(&e),
+			}
+			match parse_time_filter("before", &p.before) {
+				Ok(v) => opts.before = v,
+				Err(e) => return tool_error(&e),
+			}
+			match parse_time_filter("valid_at", &p.valid_at) {
+				Ok(v) => opts.valid_at = v,
+				Err(e) => return tool_error(&e),
+			}
+
+			let (llm_arg, embed_arg) = answer_llm_args(answer_on, &llm_fn, &embed_fn);
+
+			// Semantic lookup: a paraphrase-close prior query (brief read lock for
+			// the epoch + cosine scan). On a miss, `query_locked` runs retrieval
+			// under its own short-lived lock and does HyDE/rerank/answer with the
+			// lock RELEASED — so a slow cloud LLM never pins the read lock long
+			// enough to starve writers and trip the 30s watchdog.
+			let cached = if cacheable {
+				let g = crate::base::locks::read_recovered(&self.graph);
+				self.cache.lock().ok().and_then(|mut c| c.lookup(&g, &vec, tag))
+			} else {
+				None
+			};
+			let result = match cached {
+				Some(hit) => hit,
+				None => {
+					let (fresh, epoch) = retrieval::answer::query_locked(
+						&self.graph,
+						rcfg,
+						&vec,
+						&p.text,
+						mode,
+						llm_arg,
+						embed_arg,
+						Some(opts),
+					);
+					if cacheable {
+						// Stamp with the epoch captured at retrieval time (returned by
+						// query_locked), not the live epoch — a write during the LLM
+						// phase then correctly invalidates this entry on the next lookup.
+						if let Ok(mut c) = self.cache.lock() {
+							c.insert(epoch, text_hash, vec.clone(), tag, fresh.clone());
+						}
+					}
+					fresh
+				}
+			};
+			(result, Some(vec))
 		};
 		(self.save_fn)();
 
@@ -177,49 +226,86 @@ impl Server {
 		// stay findable without rehydrating into the hot graph).
 		let mut scored: Vec<retrieval::expand::ScoredEntity> = result.entities.clone();
 		let mut cold_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-		if scored.len() < k {
-			let cold_dir = std::path::PathBuf::from(&self.cfg.data_dir).join("cold");
-			let have: std::collections::HashSet<String> =
-				scored.iter().map(|s| s.entity.id.clone()).collect();
-			for (entity, score) in crate::base::cold::search(&cold_dir, &vec, k) {
-				if scored.len() >= k {
-					break;
-				}
-				if !have.contains(&entity.id) {
-					cold_ids.insert(entity.id.clone());
-					scored.push(retrieval::expand::ScoredEntity { entity, score });
+		// Cold-tier fill needs the query vector. On the exact-text fast path we
+		// skipped embedding (`vec` is `None`), so cold-tier is skipped too — the
+		// cached hot result already reflects what a verbatim re-ask returned.
+		if let Some(ref vec) = vec {
+			if scored.len() < k {
+				let cold_dir = std::path::PathBuf::from(&self.cfg.data_dir).join("cold");
+				let have: std::collections::HashSet<String> =
+					scored.iter().map(|s| s.entity.id.clone()).collect();
+				for (entity, score) in crate::base::cold::search(&cold_dir, vec, k) {
+					if scored.len() >= k {
+						break;
+					}
+					if !have.contains(&entity.id) {
+						cold_ids.insert(entity.id.clone());
+						scored.push(retrieval::expand::ScoredEntity { entity, score });
+					}
 				}
 			}
 		}
 
-		let entities: Vec<serde_json::Value> = scored
-			.iter()
-			.take(k)
-			.map(|st| {
-				// Echo kind/scheme/status directly from the matched
-				// Entity so kern_rpc::query can build EntityRef without
-				// a second graph lookup. `kind` is the lower-case label
-				// (matches `EntityKindLite` serde repr), `scheme` is the
-				// stable `Source` URI tag, `status` is `"active"` or
-				// `"superseded"` mirroring `EntityStatusLite`.
-				let status_str = if st.entity.is_superseded() {
-					"superseded"
-				} else {
-					"active"
-				};
-				serde_json::json!({
-					"id": st.entity.id,
-					"score": st.score,
-					"conf": st.entity.conf_mean(),
-					"conf_uncertainty": st.entity.conf_variance(),
-					"text": truncate(&st.entity.text(), 500),
-					"kind": st.entity.kind.as_str(),
-					"scheme": st.entity.source.scheme(),
-					"status": status_str,
-					"cold": cold_ids.contains(&st.entity.id),
+		let entities: Vec<serde_json::Value> = {
+			let g = match self.graph.read() {
+				Ok(g) => g,
+				Err(_) => return tool_error("graph lock poisoned"),
+			};
+			scored
+				.iter()
+				.take(k)
+				.map(|st| {
+					// Echo kind/scheme/status directly from the matched
+					// Entity so kern_rpc::query can build EntityRef without
+					// a second graph lookup. `kind` is the lower-case label
+					// (matches `EntityKindLite` serde repr), `scheme` is the
+					// stable `Source` URI tag, `status` is `"active"` or
+					// `"superseded"` mirroring `EntityStatusLite`.
+					let status_str = if st.entity.is_superseded() {
+						"superseded"
+					} else {
+						"active"
+					};
+					// Collect enriched edges so callers can see the specific
+					// logical connections between this entity and its neighbours.
+					// Only include reasons that have been enriched (have text) to
+					// avoid surfacing empty or label-only placeholders.
+					let edges: Vec<serde_json::Value> = g
+						.kern_of_entity(&st.entity.id)
+						.and_then(|kid| g.kerns.get(kid))
+						.map(|kern| {
+							crate::base::reason::collect_reason_ids(kern, &st.entity.id)
+								.into_iter()
+								.filter_map(|rid| kern.reasons.get(&rid))
+								.filter(|r| r.is_enriched())
+								.map(|r| serde_json::json!({
+									"from": r.from,
+									"to": r.to,
+									"kind": r.kind as i32,
+									"text": truncate(&r.text, 120),
+									"score": r.score,
+								}))
+								.collect()
+						})
+						.unwrap_or_default();
+					let mut v = serde_json::json!({
+						"id": st.entity.id,
+						"score": st.score,
+						"conf": st.entity.conf_mean(),
+						"conf_uncertainty": st.entity.conf_variance(),
+						"text": truncate(&st.entity.text(), 500),
+						"kind": st.entity.kind.as_str(),
+						"scheme": st.entity.source.scheme(),
+						"status": status_str,
+						"cold": cold_ids.contains(&st.entity.id),
+					});
+					if !edges.is_empty() {
+						v["edges"] = serde_json::Value::Array(edges);
+					}
+					v
 				})
-			})
-			.collect();
+				.collect()
+		};
 
 		let mut out = serde_json::json!({"entities": entities});
 		if !answer_str.is_empty() {

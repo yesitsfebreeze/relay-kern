@@ -96,6 +96,81 @@ pub fn build_digest(graph: &GraphGnn, k: usize, min_trust: f64, token_budget: us
 			out.push('\n');
 		}
 	}
+
+	// Append top enriched relationship edges: the specific logical connections
+	// between entities, ranked by heat×confidence of their from-entity.
+	// Capped at 1/3 of the remaining token budget so connections don't crowd
+	// out the entity bullets. Only Similarity/Provenance/Ratification edges
+	// (the semantically meaningful ones) are included — structural kinds like
+	// Spawn/Supersedes carry no explanatory prose.
+	let conn_budget = if token_budget > 0 {
+		let used = est_tokens(&out);
+		(token_budget.saturating_sub(used)) / 3
+	} else {
+		500 // default connection budget when no cap
+	};
+
+	if conn_budget > 0 {
+		let mut conn_lines: Vec<String> = Vec::new();
+		let mut conn_tokens = 0usize;
+		let mut conn_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+		// Build entity map once: id → (display_text, heat×conf). Avoids an
+		// O(N×M) nested kerns scan per reason during scoring and formatting.
+		let entity_cache: std::collections::HashMap<&str, (String, f64)> = graph
+			.kerns
+			.values()
+			.flat_map(|k| k.entities.values())
+			.map(|e| {
+				let t = e.text();
+				let display = match t.char_indices().nth(39) {
+					Some((byte_pos, _)) => format!("{}…", &t[..byte_pos]),
+					None => t,
+				};
+				(e.id.as_str(), (display, e.heat as f64 * e.conf_mean()))
+			})
+			.collect();
+
+		let mut kern_reasons: Vec<_> = graph
+			.kerns
+			.values()
+			.flat_map(|kern| kern.reasons.values())
+			.filter(|r| r.is_enriched() && r.kind.is_semantic())
+			.map(|r| {
+				let heat_conf = entity_cache.get(r.from.as_str()).map(|(_, hc)| *hc).unwrap_or(0.0);
+				(r, heat_conf)
+			})
+			.collect();
+		kern_reasons.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+		for (r, _) in kern_reasons {
+			let from_text = entity_cache
+				.get(r.from.as_str())
+				.map(|(t, _)| t.as_str())
+				.unwrap_or_else(|| &r.from[..8.min(r.from.len())]);
+			let line = format!("{} → {}", from_text, r.text.trim());
+			let key = dedup_key(&line);
+			if !conn_seen.insert(key) {
+				continue;
+			}
+			let t = est_tokens(&line);
+			if !conn_lines.is_empty() && conn_tokens + t > conn_budget {
+				break;
+			}
+			conn_tokens += t;
+			conn_lines.push(line);
+		}
+
+		if !conn_lines.is_empty() {
+			out.push_str("\n## Connections\n\n");
+			for l in &conn_lines {
+				out.push_str("- ");
+				out.push_str(l);
+				out.push('\n');
+			}
+		}
+	}
+
 	out
 }
 
@@ -119,7 +194,26 @@ pub fn write_digest(
 mod tests {
 	use super::*;
 	use crate::base::graph::GraphGnn;
-	use crate::base::types::{mk_entity, EntityKind};
+	use crate::base::reason::add_reason;
+	use crate::base::types::{mk_entity, EntityKind, Reason, ReasonKind};
+
+	fn graph_with_reason(kind: ReasonKind, text: &str) -> GraphGnn {
+		let mut g = GraphGnn::default();
+		let root_id = g.root.id.clone();
+		let kern = g.kerns.get_mut(&root_id).expect("root kern");
+		kern.entities.insert("a".into(), mk_entity("a", "entity alpha", 9.0, EntityKind::Claim));
+		kern.entities.insert("b".into(), mk_entity("b", "entity beta", 8.0, EntityKind::Claim));
+		add_reason(kern, Reason {
+			id: "a->b".into(),
+			from: "a".into(),
+			to: "b".into(),
+			kind,
+			text: text.to_string(),
+			score: 0.9,
+			..Default::default()
+		});
+		g
+	}
 
 	#[test]
 	fn digest_has_anchor_and_hottest_first_capped() {
@@ -246,5 +340,54 @@ mod tests {
 		let md = build_digest(&g, 1, 0.0, 0);
 		assert!(md.contains("warm and solid"), "heat*conf ranks trusted above hot-but-shaky");
 		assert!(!md.contains("hot but shaky"));
+	}
+
+	#[test]
+	fn enriched_connections_appear_in_digest() {
+		let g = graph_with_reason(ReasonKind::Similarity, "alpha and beta share the same indexing mechanism");
+		let md = build_digest(&g, 10, 0.0, 0);
+		assert!(md.contains("## Connections"), "connections section present");
+		assert!(md.contains("alpha and beta share the same indexing mechanism"), "enriched reason text in digest");
+	}
+
+	#[test]
+	fn unenriched_reasons_excluded_from_connections() {
+		let g = graph_with_reason(ReasonKind::Similarity, "");
+		let md = build_digest(&g, 10, 0.0, 0);
+		assert!(!md.contains("## Connections"), "unenriched reason produces no connections section");
+	}
+
+	#[test]
+	fn connection_entity_display_truncates_on_char_boundary() {
+		// Regression: the connection-label cache sliced entity text at raw byte
+		// 39, which panicked when a multibyte char straddled the boundary (e.g.
+		// '→' at bytes 38..41). Build an entity whose 40th boundary lands mid-char.
+		let mut g = GraphGnn::default();
+		let root_id = g.root.id.clone();
+		let kern = g.kerns.get_mut(&root_id).expect("root kern");
+		// 38 ASCII bytes, then a 3-byte '→' spanning bytes 38..41.
+		let text = "UDP multicast discovery works for kern→kern but not browser→kern.";
+		kern.entities.insert("a".into(), mk_entity("a", text, 9.0, EntityKind::Claim));
+		kern.entities.insert("b".into(), mk_entity("b", "entity beta", 8.0, EntityKind::Claim));
+		add_reason(kern, Reason {
+			id: "a->b".into(),
+			from: "a".into(),
+			to: "b".into(),
+			kind: ReasonKind::Similarity,
+			text: "shared discovery path".into(),
+			score: 0.9,
+			..Default::default()
+		});
+		// Must not panic on the char boundary; truncated label ends with the ellipsis.
+		let md = build_digest(&g, 10, 0.0, 0);
+		assert!(md.contains("## Connections"), "connection rendered without panic");
+		assert!(md.contains('…'), "long entity label truncated with ellipsis");
+	}
+
+	#[test]
+	fn supersedes_reasons_excluded_from_connections() {
+		let g = graph_with_reason(ReasonKind::Supersedes, "superseded by a newer version");
+		let md = build_digest(&g, 10, 0.0, 0);
+		assert!(!md.contains("## Connections"), "Supersedes reason excluded from connections");
 	}
 }

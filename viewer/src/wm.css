@@ -109,11 +109,13 @@
 .graph.drag { cursor: grabbing; }
 .graph svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 .graph .gn { cursor: pointer; }
-.graph .gn circle { fill: var(--surface); stroke: var(--line-3); stroke-width: 1.4; transition: stroke var(--dur) var(--ease), fill var(--dur) var(--ease); }
-.graph .gn.used circle { stroke: var(--ember); }
-.graph .gn text { font-family: var(--font); font-size: 9px; fill: var(--ink-2); }
-.graph .ge { stroke: var(--line-3); stroke-width: 1.2; }
+.graph .gn circle { fill: var(--surface); stroke: var(--line-3); stroke-width: 1.4; transition: stroke var(--dur) var(--ease), fill var(--dur) var(--ease), r var(--dur) var(--ease); }
+.graph .gn.used circle { stroke: var(--ember); fill: color-mix(in srgb, var(--ember) 12%, var(--surface)); }
+.graph .gn text { font-family: var(--font); font-size: 9px; fill: var(--ink-2); pointer-events: none; }
+.graph .ge { stroke: var(--line-3); stroke-width: 1.2; opacity: 0.5; }
+.graph .ge.used { stroke: var(--ember); stroke-width: 2; opacity: 0.85; }
 .graph-hint { position: absolute; left: 12px; bottom: 10px; font-family: var(--mono); font-size: 10px; color: var(--ink-4); pointer-events: none; }
+.graph-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--ink-4); pointer-events: none; }
 
 /* ── status bar ── */
 .statusbar {
@@ -195,6 +197,37 @@
 [data-theme="dark"] .edit-save { color: #1a0f08; }
 [data-theme="dark"] .sb-chip.on .n,
 [data-theme="dark"] .sb-ws .d { color: #1a0f08; }
+
+/* ── live memory whispers ── */
+.whispers { border-top: 1px solid var(--line); padding: 11px 28px 0; }
+.whispers-inner { max-width: 720px; margin: 0 auto; }
+.wh-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.wh-live { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ember-ink); }
+.wh-live .d { width: 5px; height: 5px; border-radius: 50%; background: var(--ember); animation: whp 2s var(--ease) infinite; }
+@keyframes whp { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.wh-tip { margin-left: auto; font-size: 10.5px; color: var(--ink-4); }
+.wh-list { display: flex; flex-direction: column; gap: 6px; padding-bottom: 10px; }
+.whisper { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 9px; background: var(--surface); border: 1px solid var(--line); transition: border-color var(--dur) var(--ease); }
+.whisper:hover { border-color: var(--line-3); }
+.whisper.cold { background: var(--cool-soft); border-color: var(--cool-line); }
+.whisper .wid { font-family: var(--mono); font-size: 10px; color: var(--ink-4); flex: none; }
+.whisper .wtx { flex: 1; min-width: 0; font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.whisper .wsc { font-family: var(--mono); font-size: 10px; color: var(--ink-4); flex: none; }
+.whisper .wedit { opacity: 0; display: inline-flex; color: var(--ink-4); padding: 3px; border-radius: 6px; flex: none; transition: opacity var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
+.whisper:hover .wedit { opacity: 0.8; }
+.whisper .wedit:hover { color: var(--ink); background: var(--hover); }
+
+/* ── tool calls ── */
+.tool-calls { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 4px; }
+.tool-call { border: 1px solid var(--line-2); border-radius: 9px; overflow: hidden; background: var(--surface); }
+.tc-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
+.tc-name { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--ember); flex: none; }
+.tc-args { font-family: var(--mono); font-size: 10px; color: var(--ink-4); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-badge { font-size: 10px; font-family: var(--mono); padding: 1px 7px; border-radius: 5px; flex: none; }
+.tc-badge.pending { background: var(--hover); color: var(--ink-3); }
+.tc-badge.ok { background: color-mix(in srgb, var(--sage) 18%, transparent); color: var(--sage); }
+.tc-badge.err { background: color-mix(in srgb, #e55 18%, transparent); color: #e55; }
+.tc-result { padding: 5px 10px 7px; font-size: 11.5px; color: var(--ink-2); border-top: 1px solid var(--line); white-space: pre-wrap; word-break: break-word; }
 
 /* ── compact density ── */
 [data-density="compact"] .thread-scroll { padding: 16px 20px 20px; }

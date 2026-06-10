@@ -138,3 +138,111 @@ impl Server {
 		tool_result_json(&serde_json::json!({"status": "pulsed", "strength": strength}))
 	}
 }
+
+#[cfg(test)]
+mod descriptor_tests {
+	use std::sync::{
+		atomic::{AtomicUsize, Ordering},
+		Arc, RwLock,
+	};
+
+	use crate::base::graph::GraphGnn;
+	use crate::base::locks::read_recovered;
+	use crate::config::Config;
+	use crate::llm;
+	use crate::mcp::Server;
+
+	fn make_server() -> (Server, Arc<AtomicUsize>) {
+		let graph = Arc::new(RwLock::new(GraphGnn::new()));
+		let counter = Arc::new(AtomicUsize::new(0));
+		let c2 = counter.clone();
+		let embedder = llm::Client::new_embed_only("http://127.0.0.1:1", "test");
+		let worker = Arc::new(crate::ingest::Worker::new(graph.clone(), embedder, None, None));
+		let server = Server {
+			graph,
+			worker,
+			llm: None,
+			save_fn: Arc::new(move || {
+				c2.fetch_add(1, Ordering::SeqCst);
+			}),
+			task_q: None,
+			cfg: Arc::new(Config::default()),
+			cache: crate::retrieval::cache::QueryCache::default_shared(),
+		};
+		(server, counter)
+	}
+
+	fn text(v: &serde_json::Value) -> String {
+		v["content"][0]["text"].as_str().unwrap_or("").to_string()
+	}
+
+	fn is_error(v: &serde_json::Value) -> bool {
+		v.get("isError").and_then(|x| x.as_bool()).unwrap_or(false)
+	}
+
+	#[tokio::test]
+	async fn add_inserts_descriptor_and_calls_save() {
+		let (srv, counter) = make_server();
+		let out = srv.tool_descriptor(
+			&serde_json::json!({"action": "add", "name": "code", "description": "source code snippets"}),
+		);
+		assert!(!is_error(&out));
+		let body: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
+		assert_eq!(body["added"], "code");
+		assert_eq!(counter.load(Ordering::SeqCst), 1);
+		let g = read_recovered(&srv.graph);
+		assert_eq!(g.root.descriptors.get("code").map(String::as_str), Some("source code snippets"));
+	}
+
+	#[tokio::test]
+	async fn add_empty_description_returns_error_no_save() {
+		let (srv, counter) = make_server();
+		let out = srv
+			.tool_descriptor(&serde_json::json!({"action": "add", "name": "code", "description": ""}));
+		assert!(is_error(&out));
+		assert!(text(&out).contains("description required"));
+		assert_eq!(counter.load(Ordering::SeqCst), 0);
+	}
+
+	#[tokio::test]
+	async fn add_missing_required_field_returns_deser_error() {
+		let (srv, _) = make_server();
+		// `name` is required; omitting it triggers serde error path
+		let out = srv.tool_descriptor(&serde_json::json!({"action": "add"}));
+		assert!(is_error(&out));
+		assert!(text(&out).contains("invalid arguments"));
+	}
+
+	#[tokio::test]
+	async fn rm_removes_existing_descriptor_and_calls_save_twice() {
+		let (srv, counter) = make_server();
+		srv.tool_descriptor(
+			&serde_json::json!({"action": "add", "name": "notes", "description": "markdown notes"}),
+		);
+		let out = srv.tool_descriptor(&serde_json::json!({"action": "rm", "name": "notes"}));
+		assert!(!is_error(&out));
+		let body: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
+		assert_eq!(body["removed"], "notes");
+		assert_eq!(counter.load(Ordering::SeqCst), 2);
+		let g = read_recovered(&srv.graph);
+		assert!(!g.root.descriptors.contains_key("notes"));
+	}
+
+	#[tokio::test]
+	async fn rm_nonexistent_is_noop_but_still_calls_save() {
+		let (srv, counter) = make_server();
+		let out = srv.tool_descriptor(&serde_json::json!({"action": "rm", "name": "ghost"}));
+		assert!(!is_error(&out));
+		let body: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
+		assert_eq!(body["removed"], "ghost");
+		assert_eq!(counter.load(Ordering::SeqCst), 1);
+	}
+
+	#[tokio::test]
+	async fn unknown_action_returns_error() {
+		let (srv, _) = make_server();
+		let out = srv.tool_descriptor(&serde_json::json!({"action": "list", "name": "x"}));
+		assert!(is_error(&out));
+		assert!(text(&out).contains("action must be add or rm"));
+	}
+}
