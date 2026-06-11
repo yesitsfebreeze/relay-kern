@@ -474,15 +474,30 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 	}
 }
 
-pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
+/// Handles produced by [`bootstrap`]: the live engine plus the side-channels a
+/// caller's serve/park loop (or TUI) needs.
+pub(crate) struct EngineHandle {
+	pub server:  std::sync::Arc<crate::mcp::Server>,
+	pub graph:   SharedGraph,
+	pub worker:  std::sync::Arc<crate::ingest::Worker>,
+	pub task_q:  std::sync::Arc<crate::tick::queue::Queue>,
+	pub llm:     crate::llm::Client,
+}
+
+/// Build the engine stack (graph + worker + tick + MCP server) and spawn every
+/// background service: watchdog, keepalive, viewer, session-mirror, file-watcher,
+/// capture, gossip, maintenance tick. Shared by `run_server` (headless daemon)
+/// and `run_mux` (TUI host). Does NOT register `.mcp.json`, does NOT bind
+/// `kern.sock`, and does NOT block — the caller owns the serve/park loop and
+/// decides whether to attach a TUI. `mux` is threaded into `mcp::Server` so the
+/// comms tools advertise + dispatch against the live pane registry.
+pub(crate) async fn bootstrap(
+	cli: &Cli,
+	cfg: &crate::config::Config,
+	mux: Option<std::sync::Arc<std::sync::Mutex<crate::mux::registry::PaneRegistry>>>,
+) -> EngineHandle {
 	if let Some(j) = journal::global() {
 		j.set_max_bytes(cfg.journal.max_today_bytes);
-	}
-
-	// Register kern in .claude/settings.json so Claude Code picks it up.
-	{
-		let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-		ensure_mcp_registered(&cwd);
 	}
 
 	// Runtime watchdog. A wedged daemon — deadlock on the graph lock, a panic
@@ -583,7 +598,7 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 			cfg.retrieval.query_cache_cap,
 			cfg.retrieval.query_cache_theta,
 		),
-		mux: None,
+		mux,
 	});
 
 	spawn_viewer(cfg, &g, &llm_client, &q, &mcp_server);
@@ -597,6 +612,23 @@ pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
 	start_gossip(cfg, &g, &q, &save_fn).await;
 
 	spawn_maintenance_tick(cfg, &g, &q);
+
+	EngineHandle { server: mcp_server, graph: g, worker, task_q: q, llm: llm_client }
+}
+
+pub async fn run_server(cli: &Cli, cfg: &crate::config::Config) {
+	// Register kern in .claude/settings.json so Claude Code picks it up.
+	{
+		let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+		ensure_mcp_registered(&cwd);
+	}
+
+	let h = bootstrap(cli, cfg, None).await;
+	let g = h.graph.clone();
+	let worker = h.worker.clone();
+	let q = h.task_q.clone();
+	let llm_client = h.llm.clone();
+	let mcp_server = h.server.clone();
 
 	let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 	tokio::spawn(async move {
