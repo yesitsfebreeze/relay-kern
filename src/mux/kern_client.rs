@@ -98,6 +98,30 @@ impl KernClient {
         Ok(())
     }
 
+    /// Query kern with LLM synthesis enabled (`answer: true`).
+    ///
+    /// Equivalent to `query` but sets `answer: true` in the MCP call so kern
+    /// runs its full retrieval → rerank → LLM answer pipeline. Expect 12–21 s.
+    /// Call from a dedicated `std::thread`; do NOT call from async context.
+    pub fn answer(&self, text: &str) -> anyhow::Result<String> {
+        let mut client = self.open()?;
+        let result = client
+            .call_tool(
+                "query",
+                &serde_json::json!({
+                    "text":   text,
+                    "k":      5,
+                    "answer": true,
+                }),
+            )
+            .with_context(|| format!("kern answer text={text:?}"))?;
+        if result.is_error {
+            let msg = Self::extract_text(&result.content).unwrap_or_default();
+            anyhow::bail!("kern answer: tool error: {msg}");
+        }
+        Ok(Self::extract_text(&result.content).unwrap_or_default())
+    }
+
     /// Query kern for documents matching `query_text`.
     ///
     /// Returns the content of the first text block in the result, or an empty
@@ -145,6 +169,18 @@ impl KernClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kern_client_answer_constructs_without_panic() {
+        // Verify KernClient::answer exists and is callable (network call will fail
+        // in CI — we only check the type compiles and error path is reachable).
+        let c = KernClient::new("127.0.0.1:19999"); // guaranteed-closed port
+        let err = c.answer("what is kern?").unwrap_err();
+        assert!(
+            err.to_string().contains("kern answer") || err.to_string().contains("connect"),
+            "unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn kern_client_constructs() {
