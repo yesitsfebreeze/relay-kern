@@ -38,19 +38,18 @@ pub struct DelegateSpec {
 /// Generate the compact boot message sent to a freshly spawned worker pane.
 ///
 /// The message tells the agent exactly what to do in its first turn:
-/// 1. Connect to kern MCP at `kern_mcp_addr` (already done automatically
-///    when kern is in the MCP server list, but stated explicitly for clarity).
-/// 2. Call `mcp__kern__query` with the task key to get the full task description.
-/// 3. Ingest results back to kern under the result key when done.
+/// 1. Call `mcp__kern__query` with the task key to get the full task description
+///    (kern is already in the pane's MCP server list — the `kern mcp` bridge
+///    attaches to the mux's in-process daemon automatically).
+/// 2. Ingest results back to kern under the result key when done.
 ///
 /// Ends with `\n` so the PTY fires the Enter key immediately.
-pub fn boot_message(session_id: &str, kern_mcp_addr: &str) -> String {
+pub fn boot_message(session_id: &str) -> String {
     let tkey   = task_key(session_id);
     let rkey   = result_key(session_id);
     format!(
         "[kern-mux bootstrap | session {session_id}]\n\
          Retrieve your task from kern before starting:\n\
-           kern MCP addr : {kern_mcp_addr}\n\
            task key      : {tkey}\n\
            result key    : {rkey}\n\
          \n\
@@ -80,16 +79,15 @@ mod tests {
 
     #[test]
     fn boot_message_contains_all_required_pieces() {
-        let msg = boot_message("abc12345", "127.0.0.1:7778");
+        let msg = boot_message("abc12345");
         assert!(msg.contains("abc12345"),            "must contain session_id: {msg:?}");
-        assert!(msg.contains("127.0.0.1:7778"),      "must contain kern addr: {msg:?}");
         assert!(msg.contains("mux:task:abc12345"),   "must contain task key: {msg:?}");
         assert!(msg.contains("mux:result:abc12345"), "must contain result key: {msg:?}");
     }
 
     #[test]
     fn boot_message_ends_with_newline() {
-        let msg = boot_message("abc12345", "127.0.0.1:7778");
+        let msg = boot_message("abc12345");
         assert!(msg.ends_with('\n'), "boot message must end with newline: {msg:?}");
     }
 

@@ -22,13 +22,6 @@ pub struct MuxConfig {
     pub key_quit: String,
     /// Key binding to toggle the kern research panel. Default `ctrl+l`.
     pub key_research: String,
-    /// TCP address the mux MCP server listens on. Default `127.0.0.1:7779`.
-    pub mcp_addr: String,
-    /// TCP address of the running kern daemon MCP server.
-    /// Used by `mux_delegate` / `mux_collect` to store and retrieve task context.
-    /// Must differ from `mcp_addr` (mux's own MCP, default 7779).
-    /// Default `127.0.0.1:7778`.
-    pub kern_mcp_addr: String,
 }
 
 impl Default for MuxConfig {
@@ -40,8 +33,6 @@ impl Default for MuxConfig {
             key_cycle:      "tab".into(),
             key_quit:       "ctrl+q".into(),
             key_research:   "ctrl+l".into(),
-            mcp_addr:       "127.0.0.1:7779".into(),
-            kern_mcp_addr:  "127.0.0.1:7778".into(),
         }
     }
 }
@@ -127,7 +118,6 @@ mod tests {
         assert_eq!(c.key_close_pane, "ctrl+w");
         assert_eq!(c.key_cycle, "tab");
         assert_eq!(c.key_quit, "ctrl+q");
-        assert_eq!(c.mcp_addr, "127.0.0.1:7779");
     }
 
     #[test]
@@ -154,13 +144,6 @@ mod tests {
     #[test]
     fn parse_key_event_unknown_returns_none() {
         assert!(parse_key_event("meta+z").is_none());
-    }
-
-    #[test]
-    fn mux_config_kern_mcp_addr_default() {
-        let c = MuxConfig::default();
-        // kern daemon MCP default is 7778; mux's own MCP is 7779.
-        assert_eq!(c.kern_mcp_addr, "127.0.0.1:7778");
     }
 
     #[test]

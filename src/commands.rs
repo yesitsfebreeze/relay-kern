@@ -171,12 +171,6 @@ pub enum Commands {
 	},
 	/// Run the MCP server over stdio (attaches to or spawns the daemon).
 	Mcp,
-	/// Bridge stdin/stdout to the running mux MCP server (for Claude Code).
-	///
-	/// Registered as `kern-mux` in `.mcp.json` so `mux_delegate` and friends
-	/// are available as MCP tools whenever the mux is running.
-	#[command(name = "mcp-mux")]
-	MuxMcp,
 	/// Quantize a kern store's vectors (none | int8) into a new directory.
 	Compress {
 		src: String,
@@ -416,7 +410,6 @@ pub async fn dispatch(cmd: Commands, cfg: &crate::config::Config) {
 		Commands::Register { path } => admin::cmd_register(cfg, &path),
 		Commands::Unnamed { action } => admin::cmd_unnamed(cfg, action),
 		Commands::Mcp => mcp_cmd::cmd_mcp(cfg).await,
-		Commands::MuxMcp => mcp_cmd::run_mux_proxy(&cfg.mux.mcp_addr).await,
 		Commands::Compress { src, mode, out } => admin::cmd_compress(&src, &mode, out.as_deref()),
 		Commands::Migrate { path } => {
 			let dir = path.unwrap_or_else(|| cfg.data_dir.clone());

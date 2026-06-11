@@ -4,17 +4,13 @@
 //! the four `mux_*` tools on a TCP loopback socket.
 
 pub mod delegate;
-mod kern_client;
-pub mod mcp;
 pub mod pty;
 pub mod registry;
 mod research;
 pub mod tui;
 
 pub use delegate::{boot_message, result_key, task_key};
-pub use kern_client::KernClient;
 pub use research::ResearchPanel;
-pub use mcp::MuxMcpServer;
 pub use pty::{new_session_id, PtySession};
 pub use registry::{PaneRegistry, SharedRegistry};
 pub use tui::run_tui;

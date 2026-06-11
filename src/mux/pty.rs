@@ -34,8 +34,7 @@ impl PtySession {
         let slave  = pair.slave;
         let master = pair.master;
 
-        let mut builder = CommandBuilder::new(&cmd);
-        builder.env("TERM", "xterm-256color");
+        let builder = build_command(&cmd)?;
         let child = slave.spawn_command(builder)?;
         drop(slave);
 
@@ -168,6 +167,26 @@ pub fn key_event_to_bytes(ev: &KeyEvent) -> Option<Vec<u8>> {
     }
 }
 
+/// Build the `CommandBuilder` for a pane child process.
+///
+/// portable-pty defaults an **unset** cwd to `%USERPROFILE%`/`$HOME` — see
+/// `CommandBuilder::current_directory`, which returns `cwd.or(home)`. Unlike
+/// `std::process::Command`, it does NOT inherit the parent's working directory.
+/// Left unset, `claude` launches in the home dir and loses every project-scoped
+/// piece of config — `CLAUDE.md`, `.claude/settings.json` (permissions/hooks),
+/// `.mcp.json` (the kern MCP server), and the project's session/memory bucket —
+/// so it presents as a different user with nothing configured. Pin cwd to the
+/// mux process's own working directory to restore `std::process` semantics.
+///
+/// (The full environment — USERPROFILE, PATH, etc. — is already inherited:
+/// `CommandBuilder::new` seeds from `std::env::vars_os()`.)
+fn build_command(cmd: &str) -> anyhow::Result<CommandBuilder> {
+    let mut builder = CommandBuilder::new(cmd);
+    builder.env("TERM", "xterm-256color");
+    builder.cwd(std::env::current_dir()?);
+    Ok(builder)
+}
+
 pub fn new_session_id() -> String {
     use rand::RngExt;
     let mut rng = rand::rng();
@@ -216,6 +235,29 @@ mod tests {
     fn key_event_to_bytes_up_arrow() {
         let ev = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(key_event_to_bytes(&ev), Some(b"\x1b[A".to_vec()));
+    }
+
+    #[test]
+    fn build_command_pins_cwd_to_current_dir() {
+        // Regression: without an explicit cwd, portable-pty spawns children in
+        // the home dir, so `claude` loses all project-scoped config.
+        let builder = build_command("claude").expect("build");
+        let cwd = builder
+            .get_cwd()
+            .expect("cwd must be pinned so the child inherits the project dir");
+        let expected = std::env::current_dir().unwrap();
+        assert_eq!(
+            std::path::Path::new(cwd),
+            expected.as_path(),
+            "child cwd pinned to mux process dir, not $HOME"
+        );
+    }
+
+    #[test]
+    fn build_command_sets_term() {
+        let builder = build_command("claude").expect("build");
+        let term = builder.get_env("TERM").expect("TERM set");
+        assert_eq!(term, std::ffi::OsStr::new("xterm-256color"));
     }
 
     #[test]

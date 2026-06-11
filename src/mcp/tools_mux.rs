@@ -223,10 +223,9 @@ impl Server {
             "sync":      true,
         }));
 
-        // Boot the worker. The addr arg is vestigial (workers reach kern via
-        // mcp__kern__query automatically); it is removed when boot_message is
-        // simplified alongside the mux/mcp.rs deletion.
-        let boot = crate::mux::boot_message(&id, "");
+        // Boot the worker — it reaches kern via mcp__kern__query automatically
+        // (its `kern mcp` bridge attaches to this in-process daemon).
+        let boot = crate::mux::boot_message(&id);
         if let Ok(mut r) = reg.lock() {
             if !r.send_to(&id, &boot) {
                 tracing::warn!(target: "kern.mux", session_id = %id, "pane vanished before boot message");
