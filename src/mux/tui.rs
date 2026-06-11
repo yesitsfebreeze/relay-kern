@@ -140,7 +140,10 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
         .unwrap_or_else(|| "?".to_string());
     let (mut cols, mut rows) = terminal::size()?;
 
-    let mut stdout = io::stdout();
+    // BufWriter coalesces the thousands of per-cell `queue!` writes into a
+    // single syscall per frame flush.  Without this, every style-change command
+    // is an individual Win32 console API call — catastrophic on a styled TTY.
+    let mut stdout = io::BufWriter::with_capacity(1 << 16, io::stdout());
     queue!(stdout, Clear(ClearType::All))?;
     stdout.flush()?;
 
