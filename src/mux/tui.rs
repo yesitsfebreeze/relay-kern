@@ -4,6 +4,7 @@
 //! the quit key or all panes exit. The terminal is restored on normal exit
 //! and on panic via `Guard`.
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::time::Duration;
 
@@ -125,6 +126,39 @@ fn apply_style(stdout: &mut impl Write, style: &CellStyle) -> io::Result<()> {
     Ok(())
 }
 
+// ── Dirty-rect snapshot types ─────────────────────────────────────────────────
+
+#[derive(Clone, PartialEq, Eq)]
+struct RenderedCell {
+    content: String,
+    style:   CellStyle,
+}
+
+pub(crate) struct ScreenSnapshot {
+    rows:  u16,
+    cols:  u16,
+    cells: Vec<RenderedCell>,
+}
+
+impl ScreenSnapshot {
+    /// Create a snapshot filled with sentinel cells that never match real output,
+    /// forcing a full redraw on the first frame.
+    fn new(rows: u16, cols: u16) -> Self {
+        let len = (rows as usize) * (cols as usize).max(1);
+        Self {
+            rows,
+            cols,
+            cells: vec![RenderedCell { content: "\x00".to_string(), style: CellStyle::default() }; len],
+        }
+    }
+    fn get(&self, row: u16, col: u16) -> &RenderedCell {
+        &self.cells[row as usize * self.cols as usize + col as usize]
+    }
+    fn set(&mut self, row: u16, col: u16, cell: RenderedCell) {
+        self.cells[row as usize * self.cols as usize + col as usize] = cell;
+    }
+}
+
 // ── Main TUI loop ─────────────────────────────────────────────────────────────
 
 /// Run the mux TUI until the user quits or all panes exit.
@@ -147,6 +181,8 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
     queue!(stdout, Clear(ClearType::All))?;
     stdout.flush()?;
 
+    let mut snapshots: HashMap<String, ScreenSnapshot> = HashMap::new();
+
     loop {
         // Drain + reap: brief lock acquisition.
         {
@@ -161,7 +197,7 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
         // Draw: read-lock for frame rendering.
         {
             let reg = registry.lock().unwrap_or_else(|p| p.into_inner());
-            draw_frame(&reg, &mut stdout, cols, rows, &cwd)?;
+            draw_frame(&reg, &mut stdout, cols, rows, &cwd, &mut snapshots)?;
         }
         stdout.flush()?;
 
@@ -174,6 +210,7 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
                     let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
                     reg.resize_all(cols, rows.saturating_sub(1));
                     queue!(stdout, Clear(ClearType::All))?;
+                    snapshots.clear();
                 }
                 Event::Key(kev) if kev.kind == KeyEventKind::Press => {
                     let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
@@ -209,12 +246,13 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 /// Render one frame: top status bar + two-column pane split.
-pub fn draw_frame(
+pub(crate) fn draw_frame(
     registry: &PaneRegistry,
     stdout: &mut impl Write,
     cols: u16,
     rows: u16,
     cwd: &str,
+    snapshots: &mut HashMap<String, ScreenSnapshot>,
 ) -> io::Result<()> {
     let pane_rows  = rows.saturating_sub(1);
     let left_cols  = cols / 2;
@@ -234,7 +272,8 @@ pub fn draw_frame(
     };
 
     if let Some(main) = registry.panes.get(0) {
-        draw_pane(stdout, main.parser.screen(), 0, left_cols, pane_rows, row_offset, main_cursor)?;
+        let snap = snapshots.entry(main.id.clone()).or_insert_with(|| ScreenSnapshot::new(0, 0));
+        draw_pane_diff(stdout, main.parser.screen(), snap, 0, left_cols, pane_rows, row_offset, main_cursor)?;
     }
 
     for row in 0..pane_rows {
@@ -243,9 +282,11 @@ pub fn draw_frame(
 
     if registry.focus > 0 {
         if let Some(sub) = registry.focused() {
-            draw_pane(
+            let snap = snapshots.entry(sub.id.clone()).or_insert_with(|| ScreenSnapshot::new(0, 0));
+            draw_pane_diff(
                 stdout,
                 sub.parser.screen(),
+                snap,
                 left_cols + 1,
                 right_cols.saturating_sub(1),
                 pane_rows,
@@ -291,28 +332,37 @@ pub fn draw_frame(
     Ok(())
 }
 
-/// Render a `vt100::Screen` into a rectangular terminal region starting at `row_offset`.
+/// Render a `vt100::Screen` into a rectangular terminal region using dirty-rect
+/// diffing: only cells whose content or style changed since the last frame are
+/// emitted. Unchanged cells are skipped entirely.
 ///
-/// `cursor_pos` — if `Some((row, col))`, that cell is rendered with its inverse bit
-/// toggled, producing a fake block cursor without moving the real terminal cursor.
-/// Pass `None` for unfocused panes; the real cursor stays hidden the whole time.
-fn draw_pane(
+/// `cursor_pos` — if `Some((row, col))`, that cell is rendered with its inverse
+/// bit toggled, producing a fake block cursor without moving the real terminal
+/// cursor. Pass `None` for unfocused panes; the real cursor stays hidden the
+/// whole time.
+fn draw_pane_diff(
     stdout: &mut impl Write,
     screen: &vt100::Screen,
+    snapshot: &mut ScreenSnapshot,
     col_offset: u16,
     width: u16,
     height: u16,
     row_offset: u16,
     cursor_pos: Option<(u16, u16)>,
 ) -> io::Result<()> {
+    // If dimensions changed, reset snapshot (forces full redraw this frame).
+    if snapshot.rows != height || snapshot.cols != width {
+        *snapshot = ScreenSnapshot::new(height, width);
+    }
+
     let (screen_rows, screen_cols) = screen.size();
-    let mut cur = CellStyle::default();
-    let mut buf = String::with_capacity(width as usize);
+    let mut cur = CellStyle::default();      // last applied terminal style
+    let mut buf = String::with_capacity(32); // pending text batch
+    let mut write_pos: Option<(u16, u16)> = None; // (row, col) terminal write-head
 
     for row in 0..height {
-        queue!(stdout, MoveTo(col_offset, row + row_offset))?;
-
         for col in 0..width {
+            // 1. Compute new cell (content + style), same logic as current draw_pane.
             let (content, mut style) = if col < screen_cols && row < screen_rows {
                 if let Some(cell) = screen.cell(row, col) {
                     let s = cell_style(cell);
@@ -326,29 +376,59 @@ fn draw_pane(
             };
 
             // Fake cursor: invert the cursor cell's style so it renders as a
-            // block cursor.  The real terminal cursor stays hidden the whole time.
+            // block cursor. The real terminal cursor stays hidden the whole time.
             if cursor_pos == Some((row, col)) {
                 style.inverse = !style.inverse;
             }
 
-            if style != cur {
+            // 2. Compare to snapshot — if identical, skip.
+            let snap = snapshot.get(row, col);
+            if snap.content == content && snap.style == style {
+                // Flush pending buf, reset write_pos (break the write run).
                 if !buf.is_empty() {
                     queue!(stdout, Print(&buf))?;
                     buf.clear();
                 }
-                apply_style(stdout, &style)?;
-                cur = style;
+                write_pos = None;
+                continue;
             }
+
+            // 3. Cell changed — needs rendering.
+            //    Move to cell position if write-head isn't already there.
+            if write_pos != Some((row, col)) {
+                if !buf.is_empty() {
+                    queue!(stdout, Print(&buf))?;
+                    buf.clear();
+                }
+                queue!(stdout, MoveTo(col_offset + col, row + row_offset))?;
+                write_pos = Some((row, col));
+            }
+
+            // 4. Apply style if changed (flush buf first).
+            if style != cur {
+                if !buf.is_empty() {
+                    queue!(stdout, Print(&buf))?;
+                    write_pos = write_pos.map(|(r, c)| (r, c + buf.chars().count() as u16));
+                    buf.clear();
+                }
+                apply_style(stdout, &style)?;
+                cur = style.clone();
+            }
+
+            // 5. Buffer the content, update snapshot.
             buf.push_str(&content);
+            snapshot.set(row, col, RenderedCell { content, style });
         }
 
+        // Flush at end of row.
         if !buf.is_empty() {
             queue!(stdout, Print(&buf))?;
             buf.clear();
         }
+        write_pos = None; // New row always needs MoveTo.
     }
 
-    // Reset style after pane to avoid bleed into adjacent regions
+    // Reset style after pane to avoid bleed into adjacent regions.
     queue!(stdout, SetAttribute(Attribute::Reset), ResetColor)?;
     Ok(())
 }
