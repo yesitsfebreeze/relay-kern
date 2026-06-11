@@ -4,6 +4,7 @@ pub mod registry;
 pub mod tui;
 
 pub use pty::{new_session_id, PtySession};
+pub use registry::{PaneRegistry, SharedRegistry};
 
 /// Launch the mux PTY-multiplexer TUI. Called when `kern` is run with no
 /// subcommand and `--daemon` is not set. Placeholder until Task 6.
