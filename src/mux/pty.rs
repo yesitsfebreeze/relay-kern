@@ -69,12 +69,19 @@ impl PtySession {
     }
 
     pub fn write_input(&mut self, bytes: &[u8]) {
-        let _ = self.writer.write_all(bytes);
-        let _ = self.writer.flush();
+        if let Err(e) = self.writer.write_all(bytes) {
+            tracing::debug!(target: "kern.mux.pty", error = %e, "write_input: write failed (pane may be dead)");
+            return;
+        }
+        if let Err(e) = self.writer.flush() {
+            tracing::debug!(target: "kern.mux.pty", error = %e, "write_input: flush failed");
+        }
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        // Reset the parser — does not reflow existing content;
+        // screen will appear blank until the child process repaints.
         self.parser = vt100::Parser::new(rows, cols, 0);
     }
 
@@ -101,7 +108,7 @@ impl Drop for PtySession {
     }
 }
 
-pub fn screen_text_from(screen: &vt100::Screen) -> String {
+pub(crate) fn screen_text_from(screen: &vt100::Screen) -> String {
     let (rows, cols) = screen.size();
     let mut lines: Vec<String> = Vec::with_capacity(rows as usize);
     for row in 0..rows {
