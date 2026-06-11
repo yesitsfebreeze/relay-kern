@@ -87,6 +87,11 @@ impl PaneRegistry {
                     serde_json::Value::Null,
                 ));
                 self.panes.remove(i);
+                // If a pane below the focus was removed, shift focus down to keep pointing at the same pane.
+                if i < self.focus && self.focus > 0 {
+                    self.focus -= 1;
+                }
+                // Clamp if the focused pane itself was removed and it was the last one.
                 if self.focus >= self.panes.len() && !self.panes.is_empty() {
                     self.focus = self.panes.len() - 1;
                 }
@@ -114,7 +119,7 @@ impl PaneRegistry {
         journal::emit(journal::Entry::new(
             journal::Kind::Log,
             "mux.send",
-            serde_json::Value::Null,
+            serde_json::json!({ "session_id": session_id, "len": text.len() }),
         ));
         true
     }
