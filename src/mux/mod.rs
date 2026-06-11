@@ -40,9 +40,10 @@ pub async fn run_mux(cfg: &Config) {
     };
 
     // ── MCP server ────────────────────────────────────────────────────────
-    let mcp_addr   = cfg.mux.mcp_addr.clone();
-    let agent_cmd  = cfg.mux.agent_cmd.clone();
-    let reg_mcp    = registry.clone();
+    let mcp_addr       = cfg.mux.mcp_addr.clone();
+    let agent_cmd      = cfg.mux.agent_cmd.clone();
+    let kern_mcp_addr  = cfg.mux.kern_mcp_addr.clone();
+    let reg_mcp        = registry.clone();
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
 
     tokio::spawn(async move {
@@ -70,8 +71,9 @@ pub async fn run_mux(cfg: &Config) {
                     }
                     let reg  = reg_mcp.clone();
                     let cmd  = agent_cmd.clone();
+                    let kern = kern_mcp_addr.clone();
                     std::thread::spawn(move || {
-                        let server = MuxMcpServer { registry: reg, agent_cmd: cmd };
+                        let server = MuxMcpServer { registry: reg, agent_cmd: cmd, kern_mcp_addr: kern };
                         let reader_stream = match std_stream.try_clone() {
                             Ok(s) => s,
                             Err(_) => return,
