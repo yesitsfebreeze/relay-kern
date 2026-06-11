@@ -1,6 +1,6 @@
 //! Slice O — kern-side filesystem watcher sink.
 //!
-//! Bridges `shared/watcher` events into kern's canonical ingest path.
+//! Bridges `src/watcher` events into kern's canonical ingest path.
 //! A `KernFileWatcherSink` implements [`watcher::IngestSink`]; on every
 //! `IngestRecord` it builds a `Document` job (kind = `EntityKind::Document`,
 //! `Source::File { path }`) and forwards through `Worker::enqueue` so the
@@ -45,7 +45,7 @@ pub(crate) fn emit_fs_write_touch(entity_id: &str, sink: &dyn Sink) {
 }
 
 /// Strip the `file://` (or `file:///`) prefix produced by
-/// `shared/watcher::pipeline::file_uri`. Returns the input unchanged when no
+/// `watcher::pipeline::file_uri`. Returns the input unchanged when no
 /// prefix is present (defensive — kern still accepts plain paths).
 fn strip_file_uri(uri: &str) -> String {
 	if let Some(rest) = uri.strip_prefix("file:///") {

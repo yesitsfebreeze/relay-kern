@@ -87,7 +87,7 @@ mod tests {
 	// CYCLE (trnsprt -> test-utils -> trnsprt), so within trnsprt's own unit-test
 	// build, AdderServer impls a *different* McpServer instance than this harness
 	// sees. A mock over this crate's own trait sidesteps that. (The cross-crate
-	// AdderServer is still used by shared/trnsprt/tests/integration.rs, a separate
+	// AdderServer is still used by src/trnsprt/tests/integration.rs, a separate
 	// crate where both see the same trnsprt.)
 	struct MockServer;
 	impl McpServer for MockServer {

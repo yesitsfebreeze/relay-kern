@@ -174,7 +174,7 @@ fn entity_kind_to_lite(k: EntityKind) -> EntityKindLite {
 /// Supersedes / Ratification / Rephrase) while `EdgeKind` is the connected-index
 /// wire vocabulary, so this is a semantic projection, not a cast. Unknown or
 /// out-of-range ints fall back to the neutral `References`. Lives in the kern
-/// adapter rather than `shared/trnsprt` because `ReasonKind` is kern-internal
+/// adapter rather than `src/trnsprt` because `ReasonKind` is kern-internal
 /// and cannot be referenced from the transport crate.
 fn edge_kind_from_reason_int(kind: i32) -> EdgeKind {
     match kind {

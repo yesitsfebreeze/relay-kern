@@ -2,14 +2,14 @@
 resolver = "2"
 members = [
     "test_utils",
-    "shared/config-io",
-    "shared/journal",
-    "shared/log",
-    "shared/protocol",
-    "shared/trnsprt",
-    "shared/trnsprt/macros",
-    "shared/watcher",
-    "shared/test-utils",
+    "src/config-io",
+    "src/journal",
+    "src/log",
+    "src/protocol",
+    "src/trnsprt",
+    "src/trnsprt/macros",
+    "src/watcher",
+    "src/test-utils",
 ]
 
 [workspace.package]
@@ -33,7 +33,7 @@ rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 axum = "0.8.9"
 rayon = "1.12"
-trnsprt-macros = { path = "shared/trnsprt/macros" }
+trnsprt-macros = { path = "src/trnsprt/macros" }
 crossterm = "0.29"
 toml = "0.8"
 unicode-segmentation = "1"
@@ -79,7 +79,7 @@ path = "benches/retrieval_trace_bench.rs"
 harness = false
 
 [dependencies]
-config-io = { path = "shared/config-io" }
+config-io = { path = "src/config-io" }
 dirs = "6"
 memmap2 = "0.9"
 clap = { version = "4", features = ["derive"] }
@@ -96,12 +96,12 @@ axum.workspace = true
 async-stream = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
-journal = { path = "shared/journal" }
+journal = { path = "src/journal" }
 tracing-subscriber.workspace = true
 tracing.workspace = true
-protocol = { path = "shared/protocol" }
-trnsprt = { path = "shared/trnsprt" }
-watcher = { path = "shared/watcher" }
+protocol = { path = "src/protocol" }
+trnsprt = { path = "src/trnsprt" }
+watcher = { path = "src/watcher" }
 async-trait = "0.1"
 heed = "0.20"
 crossterm.workspace = true
