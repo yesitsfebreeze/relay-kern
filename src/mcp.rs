@@ -4,6 +4,7 @@ pub mod sse;
 pub mod tools;
 mod tools_admin;
 mod tools_mutate;
+mod tools_mux;
 mod tools_query;
 
 use std::io::{BufReader, Read, Write};
@@ -92,8 +93,13 @@ impl trnsprt::McpServer for Server {
 	}
 
 	fn tools_list(&self) -> Vec<trnsprt::ToolSchema> {
-		tools::tool_definitions()
-			.into_iter()
+		let mut defs = tools::tool_definitions();
+		// Comms tools are advertised only when this engine hosts a pane registry
+		// (mux mode). Headless daemons keep the canonical kern tool set.
+		if self.mux.is_some() {
+			defs.extend(tools_mux::tool_schemas());
+		}
+		defs.into_iter()
 			.filter_map(|v| serde_json::from_value(v).ok())
 			.collect()
 	}
@@ -109,6 +115,13 @@ impl trnsprt::McpServer for Server {
 			"anchor"     => self.tool_anchor(args),
 			"descriptor" => self.tool_descriptor(args),
 			"pulse"      => self.tool_pulse(args),
+			// Comms tools — return a clear error when not hosted in a mux.
+			"delegate"   => self.tool_delegate(args),
+			"collect"    => self.tool_collect(args),
+			"spawn"      => self.tool_spawn(args),
+			"send"       => self.tool_send(args),
+			"panes"      => self.tool_panes(args),
+			"status"     => self.tool_status(args),
 			_ => return Ok(trnsprt::ToolResult {
 				content: vec![serde_json::json!({"type": "text", "text": format!("unknown tool: {name}")})],
 				is_error: true,
