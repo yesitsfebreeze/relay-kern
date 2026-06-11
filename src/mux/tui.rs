@@ -165,13 +165,14 @@ impl ScreenSnapshot {
 ///
 /// Acquires `registry` only for brief drain/draw/key operations, releasing it
 /// between frames so MCP worker threads can call `mux_*` tools concurrently.
-pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
+pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap, kern_mcp_addr: String) -> io::Result<()> {
     install_panic_hook();
     let _guard = Guard::enter()?;
+    // Full absolute path — the status bar front-truncates it to fit, so longer
+    // is better (it shows as much of the tail as the bar width allows).
     let cwd = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "?".to_string());
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "?".to_string());
     let (mut cols, mut rows) = terminal::size()?;
 
     // BufWriter coalesces the thousands of per-cell `queue!` writes into a
@@ -182,6 +183,7 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
     stdout.flush()?;
 
     let mut snapshots: HashMap<String, ScreenSnapshot> = HashMap::new();
+    let mut research: Option<crate::mux::ResearchPanel> = None;
 
     loop {
         // Drain + reap: brief lock acquisition.
@@ -194,8 +196,15 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
             }
         }
 
-        // Draw: read-lock for frame rendering.
-        {
+        // Draw: research panel takes over when open; otherwise normal pane draw.
+        if let Some(ref mut panel) = research {
+            panel.tick();
+            {
+                let reg = registry.lock().unwrap_or_else(|p| p.into_inner());
+                draw_status_bar(&reg, &mut stdout, cols, &cwd)?;
+            }
+            panel.draw(&mut stdout, cols, rows)?;
+        } else {
             let reg = registry.lock().unwrap_or_else(|p| p.into_inner());
             draw_frame(&reg, &mut stdout, cols, rows, &cwd, &mut snapshots)?;
         }
@@ -207,32 +216,57 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
                 Event::Resize(w, h) => {
                     cols = w;
                     rows = h;
-                    let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
-                    reg.resize_all(cols, rows.saturating_sub(1));
+                    if research.is_none() {
+                        let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
+                        reg.resize_all(cols, rows.saturating_sub(1));
+                    }
                     queue!(stdout, Clear(ClearType::All))?;
                     snapshots.clear();
                 }
                 Event::Key(kev) if kev.kind == KeyEventKind::Press => {
-                    let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
                     if keymap.matches_quit(&kev) {
                         break;
-                    } else if keymap.matches_cycle(&kev) {
-                        reg.cycle_focus();
-                    } else if keymap.matches_new_pane(&kev) {
-                        let n   = reg.panes.len();
-                        let cmd = reg.panes[0].cmd.clone();
-                        let _ = reg.spawn_pane(
-                            format!("sub-{n}"),
-                            cmd,
-                            cols / 2,
-                            rows.saturating_sub(1),
-                        );
-                    } else if keymap.matches_close_pane(&kev) {
-                        if reg.focus > 0 {
-                            if let Some(p) = reg.focused_mut() { p.kill(); }
+                    } else if keymap.matches_research(&kev) {
+                        // Toggle the research panel (no registry lock needed).
+                        match research.take() {
+                            Some(_) => {}
+                            None => {
+                                let mut panel = crate::mux::ResearchPanel::new(kern_mcp_addr.clone());
+                                panel.session.on_panel_open();
+                                research = Some(panel);
+                            }
                         }
-                    } else if let Some(bytes) = key_event_to_bytes(&kev) {
-                        if let Some(p) = reg.focused_mut() { p.write_input(&bytes); }
+                        queue!(stdout, Clear(ClearType::All))?;
+                        snapshots.clear();
+                    } else if let Some(ref mut panel) = research {
+                        // Delegate all key events to the research panel.
+                        let close = panel.handle_key(&kev);
+                        if close {
+                            research = None;
+                            queue!(stdout, Clear(ClearType::All))?;
+                            snapshots.clear();
+                        }
+                    } else {
+                        // Normal pane key routing.
+                        let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
+                        if keymap.matches_cycle(&kev) {
+                            reg.cycle_focus();
+                        } else if keymap.matches_new_pane(&kev) {
+                            let n   = reg.panes.len();
+                            let cmd = reg.panes[0].cmd.clone();
+                            let _ = reg.spawn_pane(
+                                format!("sub-{n}"),
+                                cmd,
+                                cols / 2,
+                                rows.saturating_sub(1),
+                            );
+                        } else if keymap.matches_close_pane(&kev) {
+                            if reg.focus > 0 {
+                                if let Some(p) = reg.focused_mut() { p.kill(); }
+                            }
+                        } else if let Some(bytes) = key_event_to_bytes(&kev) {
+                            if let Some(p) = reg.focused_mut() { p.write_input(&bytes); }
+                        }
                     }
                 }
                 _ => {}
@@ -297,19 +331,38 @@ pub(crate) fn draw_frame(
     }
 
     // ── Top status bar ────────────────────────────────────────────────────────
+    draw_status_bar(registry, stdout, cols, cwd)?;
+
+    Ok(())
+}
+
+/// Render the top status bar row (row 0) only.
+///
+/// Extracted so the research panel can draw the bar without triggering a full
+/// pane redraw.
+pub(crate) fn draw_status_bar(
+    registry: &PaneRegistry,
+    stdout: &mut impl Write,
+    cols: u16,
+    cwd: &str,
+) -> io::Result<()> {
     let labels: Vec<(String, String, bool)> = registry
         .panes
         .iter()
         .map(|p| (p.id.clone(), p.label.clone(), p.exited))
         .collect();
-    let left_text  = format_status_left(cwd, registry.thoughts, registry.reasons);
     let right_text = format_status_right(&labels, registry.focus);
-    let left_w     = left_text.chars().count();
     let right_w    = right_text.chars().count();
     let total      = cols as usize;
+    let chrome_w   = format_status_left("", registry.thoughts, registry.reasons)
+        .chars()
+        .count();
+    let cwd_budget = total.saturating_sub(right_w).saturating_sub(chrome_w);
+    let cwd_shown  = truncate_front(cwd, cwd_budget);
+    let left_text  = format_status_left(&cwd_shown, registry.thoughts, registry.reasons);
+    let left_w     = left_text.chars().count();
     let mid_w      = total.saturating_sub(left_w).saturating_sub(right_w);
 
-    // Left: inversed
     queue!(
         stdout,
         MoveTo(0, 0),
@@ -319,7 +372,6 @@ pub(crate) fn draw_frame(
         ResetColor,
         Print(" ".repeat(mid_w)),
     )?;
-    // Right: dark-grey tabs
     if right_w > 0 {
         queue!(
             stdout,
@@ -328,7 +380,6 @@ pub(crate) fn draw_frame(
             ResetColor,
         )?;
     }
-
     Ok(())
 }
 
@@ -433,9 +484,28 @@ fn draw_pane_diff(
     Ok(())
 }
 
+/// Truncate `s` to at most `max` chars, keeping the END of the string and
+/// prefixing an ellipsis when characters are dropped (e.g. a long path renders
+/// as `…/deep/tail/dir`). Char-safe: never splits a multi-byte codepoint.
+pub fn truncate_front(s: &str, max: usize) -> String {
+    let len = s.chars().count();
+    if len <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "…".to_string();
+    }
+    // Keep the last (max - 1) chars; the ellipsis fills the remaining slot.
+    let tail: String = s.chars().skip(len - (max - 1)).collect();
+    format!("…{tail}")
+}
+
 /// Left section of the top status bar.
 pub fn format_status_left(cwd: &str, thoughts: u32, reasons: u32) -> String {
-    format!(" kern | {} | {} Thoughts | {} Reasons ", cwd, thoughts, reasons)
+    format!(" kern | {}/{} | {} ", thoughts, reasons, cwd)
 }
 
 /// Right section of the top status bar: pane tab list.
@@ -484,9 +554,30 @@ mod tests {
     #[test]
     fn format_status_left_contains_kern_and_cwd() {
         let left = format_status_left("mydir", 3, 42);
-        assert!(left.contains("kern"),        "contains app name: {left:?}");
-        assert!(left.contains("mydir"),       "contains cwd: {left:?}");
-        assert!(left.contains("3 Thoughts"),  "contains thoughts: {left:?}");
-        assert!(left.contains("42 Reasons"),  "contains reasons: {left:?}");
+        assert!(left.contains("kern"),  "contains app name: {left:?}");
+        assert!(left.contains("mydir"), "contains cwd: {left:?}");
+        assert!(left.contains("3/42"),  "contains thoughts/reasons counts: {left:?}");
+        // Counts come BEFORE the cwd.
+        assert!(
+            left.find("3/42").unwrap() < left.find("mydir").unwrap(),
+            "counts precede cwd: {left:?}"
+        );
+    }
+
+    #[test]
+    fn truncate_front_keeps_tail_with_ellipsis() {
+        // Fits: returned unchanged.
+        assert_eq!(truncate_front("short", 10), "short");
+        assert_eq!(truncate_front("exact", 5), "exact");
+
+        // Too long: ellipsis prefix, exact char budget, path tail preserved.
+        let out = truncate_front("/home/sayhe/dev/relay/kern", 12);
+        assert_eq!(out.chars().count(), 12, "respects budget: {out:?}");
+        assert!(out.starts_with('…'),       "ellipsis prefix: {out:?}");
+        assert!(out.ends_with("relay/kern"), "keeps tail: {out:?}");
+
+        // Degenerate budgets.
+        assert_eq!(truncate_front("anything", 0), "");
+        assert_eq!(truncate_front("anything", 1), "…");
     }
 }
