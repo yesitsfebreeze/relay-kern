@@ -104,6 +104,10 @@ trnsprt = { path = "shared/trnsprt" }
 watcher = { path = "shared/watcher" }
 async-trait = "0.1"
 heed = "0.20"
+crossterm.workspace = true
+anyhow.workspace = true
+portable-pty = "0.8"
+vt100 = "0.15"
 zstd = "0.13"
 
 [dev-dependencies]

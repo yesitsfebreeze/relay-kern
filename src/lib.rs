@@ -51,5 +51,7 @@ pub mod tick;
 pub mod types;
 /// Live read-only HTTP graph viewer (force-directed web UI).
 pub mod viewer;
+/// PTY-multiplexer TUI mode — the default `kern` launch mode.
+pub mod mux;
 /// Serialisation helpers for wire-format encoding and decoding.
 pub mod wire;
