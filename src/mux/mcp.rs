@@ -272,11 +272,20 @@ impl MuxMcpServer {
         }
 
         // Send the boot message to the spawned pane.
+        let result_key = crate::mux::delegate::result_key(&id);
         let boot = crate::mux::delegate::boot_message(&id, &self.kern_mcp_addr);
         {
             let mut reg = match self.registry.lock() {
                 Ok(g)  => g,
-                Err(_) => return tool_error("registry lock poisoned (boot message not sent)"),
+                Err(e) => {
+                    tracing::error!(target: "kern.mux", session_id = %id, error = %e, "registry lock poisoned; boot message not sent");
+                    return tool_ok(serde_json::json!({
+                        "session_id": id,
+                        "task_key":   task_key,
+                        "result_key": result_key,
+                        "warning":    "boot message not sent (registry lock poisoned)"
+                    }));
+                }
             };
             if !reg.send_to(&id, &boot) {
                 tracing::warn!(target: "kern.mux", session_id = %id, "pane vanished before boot message");
@@ -286,7 +295,7 @@ impl MuxMcpServer {
         tool_ok(serde_json::json!({
             "session_id": id,
             "task_key":   task_key,
-            "result_key": crate::mux::delegate::result_key(&id),
+            "result_key": result_key,
         }))
     }
 
@@ -303,7 +312,15 @@ impl MuxMcpServer {
                 "result_key": result_key,
                 "result":     text,
             })),
-            Err(e) => tool_error(&format!("kern query failed: {e}")),
+            Err(e) => {
+                tracing::warn!(target: "kern.mux", session_id = %p.session_id, error = %e, "kern query failed in collect");
+                tool_ok(serde_json::json!({
+                    "session_id": p.session_id,
+                    "result_key": result_key,
+                    "result":     "",
+                    "warning":    format!("kern unreachable: {e}"),
+                }))
+            }
         }
     }
 }
