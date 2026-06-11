@@ -16,7 +16,7 @@ running in its own OS PTY. The default agent command is `claude` (Claude Code), 
 via `kern.toml`. The left pane is always the main/orchestrator agent. The right half shows
 whichever sub-pane is currently focused. A tab strip at the bottom lists all active panes.
 
-An MCP server bound to `mux.sock` exposes four relay tools so agents in panes can spawn,
+An MCP server bound to `mux.sock` exposes four mux tools so agents in panes can spawn,
 interrogate, and communicate with sibling panes programmatically.
 
 ---
@@ -89,11 +89,11 @@ launches a reader thread that drains output into an `mpsc::channel`. Mirrors
 
 **`drain(&mut self)`** — drains `rx` via `try_recv` loop, feeds bytes into `vt100::Parser::process()`. Called each frame.
 
-**`write_input(&mut self, bytes: &[u8])`** — writes to PTY stdin. Used for keystrokes and `relay_send`.
+**`write_input(&mut self, bytes: &[u8])`** — writes to PTY stdin. Used for keystrokes and `mux_send`.
 
 **`resize(&mut self, cols: u16, rows: u16)`** — resizes PTY and rebuilds parser.
 
-**`screen_text(&self) -> String`** — iterates `vt100::Screen` rows, collects cell contents as plain text (newline-separated, trailing whitespace trimmed). Used by `relay_status`.
+**`screen_text(&self) -> String`** — iterates `vt100::Screen` rows, collects cell contents as plain text (newline-separated, trailing whitespace trimmed). Used by `mux_status`.
 
 ---
 
@@ -128,7 +128,7 @@ pub type SharedRegistry = Arc<Mutex<PaneRegistry>>;
 |--------|----------------|
 | Pane spawned | `ForkOpen { fork_id: id, parent: None }` |
 | Pane exited | `ForkClose { fork_id: id }` |
-| `relay_send` called | `Log` with key `"mux.send"` |
+| `mux_send` called | `Log` with key `"mux.send"` |
 
 ---
 
@@ -213,24 +213,24 @@ Only active in mux mode. Never registered when running `--daemon`.
 
 Implements `trnsprt::McpServer`. Holds `Arc<Mutex<PaneRegistry>>`.
 
-### Tools
+### Tools (all prefixed `mux_`)
 
-**`relay_spawn`**
+**`mux_spawn`**
 - Args: `label: string`, `cmd?: string`
 - Returns: `{ session_id: string }`
 - Spawns a new sub-pane. Uses `cfg.mux.agent_cmd` when `cmd` is omitted.
 
-**`relay_send`**
+**`mux_send`**
 - Args: `session_id: string`, `text: string`
 - Returns: `{}`
 - Writes `text` to the target pane's PTY stdin. Emits journal `Log`.
 
-**`relay_list`**
+**`mux_list`**
 - Args: _(none)_
 - Returns: `[{ session_id, label, exited }]`
 - Lists all current panes.
 
-**`relay_status`**
+**`mux_status`**
 - Args: `session_id: string`
 - Returns: `{ session_id, label, exited, cols, rows, cursor_row, cursor_col, screen_text }`
 - `screen_text` is the full visible pane content as plain text (rows joined with `\n`, trailing
