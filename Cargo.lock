@@ -1472,6 +1472,7 @@ dependencies = [
  "trnsprt",
  "vt100",
  "watcher",
+ "windows-sys 0.61.2",
  "zstd",
 ]
 
