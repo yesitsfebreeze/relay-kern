@@ -2,11 +2,11 @@ use serde::{Deserialize, Serialize};
 
 /// Configuration for Claude-Code memory capture + recall.
 ///
-/// OFF by default. Opt in via a `[capture]` section in `.kern/kern.toml`:
+/// ON by default. Disable via `[capture] enabled = false` in `.kern/kern.toml`:
 ///
 /// ```toml
 /// [capture]
-/// enabled = true
+/// enabled = false
 /// ```
 ///
 /// `dir` and `digest_path` are intentionally **cwd-relative and independent
@@ -56,7 +56,7 @@ pub struct CaptureConfig {
 impl Default for CaptureConfig {
 	fn default() -> Self {
 		Self {
-			enabled: false,
+			enabled: true,
 			dir: ".kern/capture".into(),
 			poll_secs: 5,
 			digest_path: ".kern/digest.md".into(),
@@ -92,9 +92,9 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn defaults_are_off_with_sane_tunables() {
+	fn defaults_are_on_with_sane_tunables() {
 		let c = CaptureConfig::default();
-		assert!(!c.enabled);
+		assert!(c.enabled);
 		assert_eq!(c.dir, ".kern/capture");
 		assert_eq!(c.poll_secs, 5);
 		assert_eq!(c.digest_path, ".kern/digest.md");
