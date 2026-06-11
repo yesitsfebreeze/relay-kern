@@ -157,13 +157,28 @@ impl McpServer for ProxyServer {
 	}
 
 	fn tools_list(&self) -> Vec<ToolSchema> {
-		// Tool schema is static — no graph state needed. Serve directly
-		// from the same source the standalone path uses so a proxy and
-		// a standalone instance advertise byte-identical tool lists.
-		crate::mcp::tools::tool_definitions()
-			.into_iter()
-			.filter_map(|v| serde_json::from_value(v).ok())
-			.collect()
+		// Forward the daemon's LIVE tool list over kern_rpc so a pane sees
+		// whatever the daemon actually exposes (e.g. the mux comms tools when
+		// attached to a mux), not a static snapshot. Falls back to the static
+		// catalogue if the list_tools RPC fails.
+		let client = self.client.clone();
+		let res = tokio::task::block_in_place(|| {
+			tokio::runtime::Handle::current().block_on(async move {
+				let c = client.lock().await;
+				c.list_tools(trnsprt::kern_rpc::ListToolsReq {}).await
+			})
+		});
+		match res {
+			Ok(r) => r
+				.tools
+				.into_iter()
+				.filter_map(|v| serde_json::from_value(v).ok())
+				.collect(),
+			Err(_) => crate::mcp::tools::tool_definitions()
+				.into_iter()
+				.filter_map(|v| serde_json::from_value(v).ok())
+				.collect(),
+		}
 	}
 
 	fn call_tool(

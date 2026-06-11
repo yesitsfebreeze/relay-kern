@@ -26,8 +26,9 @@ pub mod svc;
 pub use dto::{
     Anchor, AnchorReq, AnchorRes, CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq,
     DescriptorRes, EdgeKind, EntityKindLite, EntityRef, EntityStatusLite, ForgetReq, ForgetRes,
-    HealthRes, IngestReq, IngestRes, LinkReq, LinkRes, NeighborsReq, NeighborsRes, PulseReq,
-    PulseRes, QueryReq, QueryRes, SourceLite, TruncateAfterReq, TruncateAfterRes,
+    HealthRes, IngestReq, IngestRes, LinkReq, LinkRes, ListToolsReq, ListToolsRes, NeighborsReq,
+    NeighborsRes, PulseReq, PulseRes, QueryReq, QueryRes, SourceLite, TruncateAfterReq,
+    TruncateAfterRes,
 };
 pub use mock::MockKernServer;
 pub use svc::{serve_kern_rpc, KernRpc, KernRpcClient};

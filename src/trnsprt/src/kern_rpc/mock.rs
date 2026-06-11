@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use super::dto::{
     CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq, DescriptorRes, EdgeKind,
     EntityKindLite, EntityRef, EntityStatusLite, ForgetReq, ForgetRes, HealthRes, IngestReq,
-    AnchorReq, AnchorRes, IngestRes, LinkReq, LinkRes, NeighborsReq, NeighborsRes, PulseReq,
-    PulseRes, QueryReq, QueryRes, TruncateAfterReq, TruncateAfterRes,
+    AnchorReq, AnchorRes, IngestRes, LinkReq, LinkRes, ListToolsReq, ListToolsRes, NeighborsReq,
+    NeighborsRes, PulseReq, PulseRes, QueryReq, QueryRes, TruncateAfterReq, TruncateAfterRes,
 };
 use super::svc::KernRpc;
 
@@ -266,6 +266,13 @@ impl KernRpc for MockKernServer {
         _req: CallToolReq,
     ) -> impl ::core::future::Future<Output = CallToolRes> + Send {
         async move { CallToolRes::default() }
+    }
+
+    fn list_tools(
+        &self,
+        _req: ListToolsReq,
+    ) -> impl ::core::future::Future<Output = ListToolsRes> + Send {
+        async move { ListToolsRes::default() }
     }
 }
 

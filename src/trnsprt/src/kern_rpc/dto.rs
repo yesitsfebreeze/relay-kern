@@ -391,6 +391,22 @@ pub struct CallToolRes {
     pub envelope: serde_json::Value,
 }
 
+// ---- list_tools ----------------------------------------------------------
+
+/// No request payload — asks the daemon to enumerate its live MCP tool
+/// surface so the `kern mcp` proxy can reflect it (rather than serving a
+/// static snapshot that omits the mux comms tools).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ListToolsReq {}
+
+/// The daemon's live `tools/list`: each entry is a raw MCP tool-schema JSON
+/// object exactly as `mcp::Server::tools_list` advertises it (including the
+/// mux comms tools when the daemon hosts a pane registry).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ListToolsRes {
+    pub tools: Vec<serde_json::Value>,
+}
+
 // ---- bincode + serde_json roundtrip smoke ---------------------------------
 
 #[cfg(test)]

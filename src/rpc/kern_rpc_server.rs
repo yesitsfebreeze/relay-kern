@@ -22,8 +22,9 @@ use serde_json::Value;
 use trnsprt::kern_rpc::{
     CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq, DescriptorRes, EdgeKind,
     EntityKindLite, EntityRef, EntityStatusLite, ForgetReq, ForgetRes, HealthRes, IngestReq,
-    AnchorReq, AnchorRes, IngestRes, KernRpc, LinkReq, LinkRes, NeighborsReq, NeighborsRes,
-    PulseReq, PulseRes, QueryReq, QueryRes, SourceLite, TruncateAfterReq, TruncateAfterRes,
+    AnchorReq, AnchorRes, IngestRes, KernRpc, LinkReq, LinkRes, ListToolsReq, ListToolsRes,
+    NeighborsReq, NeighborsRes, PulseReq, PulseRes, QueryReq, QueryRes, SourceLite,
+    TruncateAfterReq, TruncateAfterRes,
 };
 use trnsprt::search::EdgeRef;
 use trnsprt::typed::{Channel, JsonEnvelopeCodec, LocalListener};
@@ -619,6 +620,23 @@ impl KernRpc for KernRpcHandler {
                 }),
             };
             CallToolRes { envelope }
+        }
+    }
+
+    fn list_tools(
+        &self,
+        _req: ListToolsReq,
+    ) -> impl ::core::future::Future<Output = ListToolsRes> + Send {
+        let kern = self.kern.clone();
+        async move {
+            // Serialise the daemon's live `tools/list` (which appends the mux
+            // comms tools when a pane registry is present) back to raw JSON
+            // schemas so the proxy can advertise exactly what we expose.
+            let tools = McpServer::tools_list(&*kern)
+                .iter()
+                .filter_map(|s| serde_json::to_value(s).ok())
+                .collect();
+            ListToolsRes { tools }
         }
     }
 }

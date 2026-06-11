@@ -21,9 +21,9 @@
 
 use super::dto::{
     CallToolReq, CallToolRes, DegradeReq, DegradeRes, DescriptorReq, DescriptorRes, ForgetReq,
-    ForgetRes, HealthRes, IngestReq, IngestRes, LinkReq, LinkRes, NeighborsReq, NeighborsRes,
-    AnchorReq, AnchorRes, PulseReq, PulseRes, QueryReq, QueryRes, TruncateAfterReq,
-    TruncateAfterRes,
+    ForgetRes, HealthRes, IngestReq, IngestRes, LinkReq, LinkRes, ListToolsReq, ListToolsRes,
+    NeighborsReq, NeighborsRes, AnchorReq, AnchorRes, PulseReq, PulseRes, QueryReq, QueryRes,
+    TruncateAfterReq, TruncateAfterRes,
 };
 
 crate::service! {
@@ -68,5 +68,10 @@ crate::service! {
         /// MCP `tools/call` requests over kern.sock without
         /// enumerating each tool as a typed method.
         async fn call_tool(req: CallToolReq) -> CallToolRes;
+        /// Enumerate the daemon's live MCP tool schemas. Forwarded by the
+        /// `kern mcp` proxy so a pane's `tools/list` reflects what the
+        /// daemon actually exposes (e.g. the mux comms tools), not the
+        /// proxy's static catalogue.
+        async fn list_tools(req: ListToolsReq) -> ListToolsRes;
     }
 }
