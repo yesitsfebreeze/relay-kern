@@ -59,7 +59,7 @@ fn main() {
 			Some(Commands::Daemon) => run_server(&cli, &cfg).await,
 			Some(cmd)              => dispatch(cmd, &cfg).await,
 			None if cli.daemon     => run_server(&cli, &cfg).await,
-			None                   => run_mux(&cfg).await,
+			None                   => run_mux(&cli, &cfg).await,
 		}
 	});
 }

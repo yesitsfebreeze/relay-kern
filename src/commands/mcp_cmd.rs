@@ -69,42 +69,6 @@ pub(super) async fn cmd_mcp(cfg: &crate::config::Config) {
 	}
 }
 
-/// Ensure a kern daemon is running for this cwd, spawning a detached one if not.
-///
-/// Probes `kern.sock`: if a daemon already answers, returns at once. Otherwise
-/// spawns a detached `kern --daemon` (null stdio, outlives us — same mechanism
-/// `kern mcp` uses) and waits a short, bounded window for its socket to come up.
-///
-/// Called by the mux at launch so every spawned pane's `kern mcp` bridge
-/// attaches to one warm shared daemon (proxy mode) instead of each cold-spawning
-/// its own and timing out — the "failed to reconnect" symptom.
-///
-/// Returns `true` if a daemon was already running, `false` if one was spawned
-/// (or the spawn failed — see logs).
-pub(crate) async fn ensure_daemon() -> bool {
-	// Fast path: a daemon already serving kern.sock needs nothing more.
-	if attach_with_retry(1, 0).await.is_ok() {
-		return true;
-	}
-	// None reachable — spawn a detached daemon and give its socket a brief
-	// head start so the first pane attaches in proxy mode rather than racing to
-	// cold-spawn a second daemon. ~2s budget; if it's not up by then we proceed
-	// anyway and the pane's own attach-retry covers the remainder.
-	if let Err(e) = spawn_daemon() {
-		tracing::warn!(target: "kern.mcp", error = %e, "ensure_daemon: spawn failed");
-		return false;
-	}
-	match attach_with_retry(8, 250).await {
-		Ok(_) => tracing::info!(target: "kern.mcp", "ensure_daemon: daemon up"),
-		Err(e) => tracing::warn!(
-			target: "kern.mcp",
-			error = %e,
-			"ensure_daemon: daemon not ready in budget; panes will retry"
-		),
-	}
-	false
-}
-
 async fn run_proxy(client: KernRpcClient<JsonEnvelopeCodec>) {
 	tracing::info!(
 		target: "kern.mcp_proxy",

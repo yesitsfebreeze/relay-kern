@@ -23,22 +23,17 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::{Config, KeyMap};
 
-/// Launch the mux TUI.
+/// Launch the mux TUI as the cwd's singleton kern daemon.
 ///
-/// 1. Ensures the per-cwd kern daemon is running (spawns a detached one if not)
-///    so every pane shares one warm daemon.
-/// 2. Starts the MCP server on `cfg.mux.mcp_addr` in a background task.
-/// 3. Runs the TUI render loop (blocks until quit).
-/// 4. Cancels the MCP task on return.
-pub async fn run_mux(cfg: &Config) {
-    // Bring up the per-cwd kern daemon BEFORE spawning any pane, so each pane's
-    // `kern mcp` bridge attaches to one warm shared daemon (proxy mode) instead
-    // of cold-spawning its own and timing out. Detached + null stdio, so it
-    // never touches the TUI. No-op (instant) when a daemon is already running.
-    crate::commands::ensure_daemon().await;
-
-    // Register kern MCP in this project's .claude/settings.json so
-    // `mcp__kern__*` tools appear in Claude Code automatically.
+/// Binds `kern.sock` and serves the engine **in-process** (via
+/// [`crate::commands::bootstrap`]), so every spawned pane's `kern mcp` bridge
+/// attaches to THIS process in proxy mode and the comms tools dispatch against
+/// the live pane registry. If a daemon already owns the cwd, the TUI runs
+/// attached to it (no second engine — single-writer lock). Blocks on the TUI
+/// render loop until quit, then persists the graph.
+pub async fn run_mux(cli: &crate::commands::Cli, cfg: &Config) {
+    // Register kern MCP in this project's .mcp.json so `mcp__kern__*` tools
+    // appear in Claude Code automatically and panes attach to this process.
     {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         crate::commands::ensure_mcp_registered(&cwd);
@@ -56,67 +51,46 @@ pub async fn run_mux(cfg: &Config) {
         }
     };
 
-    // ── MCP server ────────────────────────────────────────────────────────
-    let mcp_addr       = cfg.mux.mcp_addr.clone();
-    let agent_cmd      = cfg.mux.agent_cmd.clone();
-    let kern_mcp_addr  = cfg.mux.kern_mcp_addr.clone();
-    let reg_mcp        = registry.clone();
-    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    // ── Become the cwd singleton: own kern.sock + serve the engine in-process ──
+    let endpoint = trnsprt::typed::Endpoint::kern();
+    match trnsprt::typed::bind_kern_listener(&endpoint).await {
+        Ok(trnsprt::typed::BindOutcome::Bound(listener)) => {
+            // We own the cwd. Build the engine with the pane registry threaded in
+            // so the comms tools (delegate/collect/panes/…) dispatch against it,
+            // then serve kern.sock so every pane's `kern mcp` bridge attaches here.
+            let h = crate::commands::bootstrap(cli, cfg, Some(registry.clone())).await;
+            let mem = Arc::new(std::sync::Mutex::new(crate::memory_service::MemoryService::new()));
+            let handler = crate::rpc::KernRpcHandler::new(h.server.clone(), mem);
+            tokio::spawn(crate::rpc::serve_kern_rpc_loop(listener, handler));
+            tracing::info!(target: "kern.mux", "mux owns kern.sock; engine in-process");
 
-    tokio::spawn(async move {
-        let listener = match tokio::net::TcpListener::bind(&mcp_addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!(target: "kern.mux", addr = %mcp_addr, error = %e, "mux MCP bind failed");
-                return;
-            }
-        };
-        tracing::info!(target: "kern.mux", addr = %mcp_addr, "mux MCP listening");
+            run_tui_blocking(registry.clone(), KeyMap::from_config(&cfg.mux)).await;
 
-        let mut cancel_rx = cancel_rx;
-        loop {
-            tokio::select! {
-                _ = &mut cancel_rx => break,
-                result = listener.accept() => {
-                    let Ok((stream, _)) = result else { continue };
-                    let Ok(std_stream) = stream.into_std() else { continue };
-                    // Tokio sets the fd non-blocking; restore blocking mode so the OS thread's
-                    // BufReader::read_line in serve_rw blocks correctly instead of getting WouldBlock.
-                    if let Err(e) = std_stream.set_nonblocking(false) {
-                        tracing::warn!(target: "kern.mux", error = %e, "set_nonblocking(false) failed; skipping connection");
-                        continue;
-                    }
-                    let reg  = reg_mcp.clone();
-                    let cmd  = agent_cmd.clone();
-                    let kern = kern_mcp_addr.clone();
-                    std::thread::spawn(move || {
-                        let server = MuxMcpServer { registry: reg, agent_cmd: cmd, kern_mcp_addr: kern };
-                        let reader_stream = match std_stream.try_clone() {
-                            Ok(s) => s,
-                            Err(_) => return,
-                        };
-                        let mut reader = std::io::BufReader::new(reader_stream);
-                        let mut writer = std_stream;
-                        let _ = trnsprt::serve_rw(&mut reader, &mut writer, &server);
-                    });
-                }
-            }
+            // Persist on exit, same as the headless daemon's shutdown path.
+            let g = crate::base::locks::read_recovered(&h.graph);
+            crate::commands::save_graph(&g);
         }
-    });
-
-    // ── TUI loop (blocking) ───────────────────────────────────────────────
-    // `run_tui` calls `event::poll`/`event::read` in a hot loop — blocking
-    // syscalls that must not occupy a tokio async-worker thread. We hand off
-    // to `spawn_blocking` so the tokio runtime remains responsive for the
-    // MCP server tasks.
-    let keymap  = KeyMap::from_config(&cfg.mux);
-    let reg_tui = registry.clone();
-    match tokio::task::spawn_blocking(move || run_tui(&reg_tui, &keymap)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => eprintln!("kern mux: TUI error: {e}"),
-        Err(e)     => eprintln!("kern mux: TUI panicked: {e}"),
+        Ok(trnsprt::typed::BindOutcome::AlreadyRunning) => {
+            // A headless daemon already owns this cwd; do NOT open a second engine
+            // (single-writer lock). The TUI runs attached: panes + research chat
+            // reach the existing daemon over kern.sock. Comms tools that need this
+            // process's registry are unavailable in this degraded mode.
+            tracing::info!(target: "kern.mux", "daemon already owns kern.sock; TUI attaches to it");
+            run_tui_blocking(registry.clone(), KeyMap::from_config(&cfg.mux)).await;
+        }
+        Err(e) => {
+            eprintln!("kern mux: kern.sock bind failed: {e}");
+        }
     }
+}
 
-    // Signal the MCP task to stop.
-    let _ = cancel_tx.send(());
+/// Run the blocking TUI render loop on a dedicated blocking thread so its
+/// `event::poll`/`event::read` syscalls never park a tokio async worker (the
+/// in-process engine + kern_rpc accept loop need those workers responsive).
+async fn run_tui_blocking(registry: SharedRegistry, keymap: KeyMap) {
+    match tokio::task::spawn_blocking(move || run_tui(&registry, &keymap)).await {
+        Ok(Ok(()))  => {}
+        Ok(Err(e))  => eprintln!("kern mux: TUI error: {e}"),
+        Err(e)      => eprintln!("kern mux: TUI panicked: {e}"),
+    }
 }

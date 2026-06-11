@@ -6,10 +6,6 @@ mod profile_cmd;
 mod query;
 mod reembed;
 
-/// Ensure the per-cwd kern daemon is running (spawning a detached one if not).
-/// Consumed by the mux at launch so spawned panes share one warm daemon.
-pub(crate) use mcp_cmd::ensure_daemon;
-
 /// Register kern MCP servers in the project's `.mcp.json`.
 /// Called at mux and daemon startup — idempotent, safe to call every boot.
 pub(crate) use mcp_cmd::ensure_mcp_registered;
