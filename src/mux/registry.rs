@@ -17,6 +17,8 @@ pub struct PaneRegistry {
     /// Terminal dimensions at the time of last resize.
     pub cols: u16,
     pub rows: u16,
+    pub thoughts: u32,
+    pub reasons:  u32,
 }
 
 impl PaneRegistry {
@@ -32,7 +34,7 @@ impl PaneRegistry {
             "mux",
             serde_json::json!({ "fork_id": id }),
         ));
-        Ok(Self { panes: vec![pane], focus: 0, cols, rows })
+        Ok(Self { panes: vec![pane], focus: 0, cols, rows, thoughts: 0, reasons: 0 })
     }
 
     /// Spawn a new sub-pane and return its session id.
