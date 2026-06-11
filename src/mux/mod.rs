@@ -10,7 +10,7 @@ pub mod pty;
 pub mod registry;
 pub mod tui;
 
-pub use delegate::{boot_message, kern_ingest_text, result_key, task_key, DelegateSpec};
+pub use delegate::{boot_message, result_key, task_key};
 pub use kern_client::KernClient;
 pub use mcp::MuxMcpServer;
 pub use pty::{new_session_id, PtySession};

@@ -328,7 +328,7 @@ impl MuxMcpServer {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn tool_ok(v: serde_json::Value) -> serde_json::Value {
-    let s = serde_json::to_string(&v).unwrap_or_default();
+    let s = serde_json::to_string(&v).expect("Value serialization is infallible");
     serde_json::json!({ "content": [{ "type": "text", "text": s }] })
 }
 
