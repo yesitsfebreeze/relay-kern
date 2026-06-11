@@ -218,8 +218,20 @@ pub fn draw_frame(
     let right_cols = cols - left_cols;
     let row_offset: u16 = 1;   // row 0 = status bar
 
+    // Fake cursor: only the focused pane gets a cursor_pos; others get None.
+    let main_cursor = if registry.focus == 0 {
+        registry.panes.get(0).map(|p| p.parser.screen().cursor_position())
+    } else {
+        None
+    };
+    let sub_cursor = if registry.focus > 0 {
+        registry.focused().map(|p| p.parser.screen().cursor_position())
+    } else {
+        None
+    };
+
     if let Some(main) = registry.panes.get(0) {
-        draw_pane(stdout, main.parser.screen(), 0, left_cols, pane_rows, row_offset)?;
+        draw_pane(stdout, main.parser.screen(), 0, left_cols, pane_rows, row_offset, main_cursor)?;
     }
 
     for row in 0..pane_rows {
@@ -235,6 +247,7 @@ pub fn draw_frame(
                 right_cols.saturating_sub(1),
                 pane_rows,
                 row_offset,
+                sub_cursor,
             )?;
         }
     }
@@ -272,21 +285,14 @@ pub fn draw_frame(
         )?;
     }
 
-    // ── Cursor: position at focused pane's vt100 cursor, then show ───────────
-    let (focused_screen, pane_col_offset) = if registry.focus > 0 {
-        (registry.focused().map(|p| p.parser.screen()), left_cols + 1)
-    } else {
-        (registry.panes.get(0).map(|p| p.parser.screen()), 0u16)
-    };
-    if let Some(screen) = focused_screen {
-        let (crow, ccol) = screen.cursor_position();
-        queue!(stdout, MoveTo(pane_col_offset + ccol, crow + 1), Show)?;
-    }
-
     Ok(())
 }
 
 /// Render a `vt100::Screen` into a rectangular terminal region starting at `row_offset`.
+///
+/// `cursor_pos` — if `Some((row, col))`, that cell is rendered with its inverse bit
+/// toggled, producing a fake block cursor without moving the real terminal cursor.
+/// Pass `None` for unfocused panes; the real cursor stays hidden the whole time.
 fn draw_pane(
     stdout: &mut impl Write,
     screen: &vt100::Screen,
@@ -294,6 +300,7 @@ fn draw_pane(
     width: u16,
     height: u16,
     row_offset: u16,
+    cursor_pos: Option<(u16, u16)>,
 ) -> io::Result<()> {
     let (screen_rows, screen_cols) = screen.size();
     let mut cur = CellStyle::default();
@@ -303,7 +310,7 @@ fn draw_pane(
         queue!(stdout, MoveTo(col_offset, row + row_offset))?;
 
         for col in 0..width {
-            let (content, style) = if col < screen_cols && row < screen_rows {
+            let (content, mut style) = if col < screen_cols && row < screen_rows {
                 if let Some(cell) = screen.cell(row, col) {
                     let s = cell_style(cell);
                     let c = cell.contents();
@@ -314,6 +321,12 @@ fn draw_pane(
             } else {
                 (" ".to_string(), CellStyle::default())
             };
+
+            // Fake cursor: invert the cursor cell's style so it renders as a
+            // block cursor.  The real terminal cursor stays hidden the whole time.
+            if cursor_pos == Some((row, col)) {
+                style.inverse = !style.inverse;
+            }
 
             if style != cur {
                 if !buf.is_empty() {
