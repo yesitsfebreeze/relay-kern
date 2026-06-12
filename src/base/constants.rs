@@ -151,6 +151,12 @@ pub const GOSSIP_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// is reached, brand-new remote ids are dropped while existing ids still
 /// CRDT-merge (so legitimate updates to known entities are never lost).
 pub const GOSSIP_REMOTE_KERN_ENTITY_CAP: usize = 50_000;
+/// Soft cap on the number of per-peer rate-limit buckets the sybil `RateClipper`
+/// tracks. The bucket map keys on the (attacker-controlled) message origin, so a
+/// flood of distinct forged peer ids would otherwise grow it without bound. When
+/// the map reaches this size, buckets whose rate-limit window has fully elapsed
+/// (and so hold no live state — they reset on next contact) are reclaimed.
+pub const GOSSIP_SYBIL_PEER_CAP: usize = 100_000;
 /// Upper bound on an inbound CRDT delta's per-replica value. The value is the
 /// sender's absolute slot total, max-merged into the local GCounter; rejecting
 /// values above this coarsely bounds a peer pinning a slot toward `u64::MAX`.
