@@ -949,6 +949,10 @@ async fn start_gossip(
 		g.network_id.clone()
 	};
 	let node = crate::gossip::node::Node::new(&cfg.gossip.addr, &network_id, cfg.gossip.peers.clone());
+	// Wire the configured ledger cap. Without this `config.graph.max_ledger_entries`
+	// was dead — the routing/thought ledger always used the hardcoded
+	// DEFAULT_LEDGER_CAP regardless of config.
+	node.ledger.set_max_entries(cfg.graph.max_ledger_entries);
 	let deps = Arc::new(crate::gossip::handler::Deps {
 		graph: g.clone(),
 		node: node.clone(),
