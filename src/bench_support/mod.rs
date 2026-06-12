@@ -16,6 +16,7 @@
 //! - [`embed`] — a deterministic stub embedder so trace replays are reproducible
 //!   without a live embedding model.
 
+pub mod backend;
 pub mod build;
 pub mod embed;
 pub mod latency;
