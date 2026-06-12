@@ -290,28 +290,39 @@ fn handle_crdt_delta(d: &Deps, msg: GossipMessage) {
 	let mut incoming = GCounter::new();
 	incoming.increment(&delta.replica, value);
 
-	let mut g = write_recovered(&d.graph);
-	match delta.target {
-		CrdtTarget::ThoughtAccessCount => {
-			for kern_id in g.all_ids() {
-				if let Some(kern) = g.get_mut(&kern_id) {
-					if let Some(t) = kern.entities.get_mut(&delta.object_id) {
-						t.access_count.merge(&incoming);
-						break;
+	let mut changed = false;
+	{
+		let mut g = write_recovered(&d.graph);
+		match delta.target {
+			CrdtTarget::ThoughtAccessCount => {
+				for kern_id in g.all_ids() {
+					if let Some(kern) = g.get_mut(&kern_id) {
+						if let Some(t) = kern.entities.get_mut(&delta.object_id) {
+							changed = t.access_count.merge(&incoming);
+							break;
+						}
+					}
+				}
+			}
+			CrdtTarget::ReasonTraversalCount => {
+				for kern_id in g.all_ids() {
+					if let Some(kern) = g.get_mut(&kern_id) {
+						if let Some(r) = kern.reasons.get_mut(&delta.object_id) {
+							changed = r.traversal_count.merge(&incoming);
+							break;
+						}
 					}
 				}
 			}
 		}
-		CrdtTarget::ReasonTraversalCount => {
-			for kern_id in g.all_ids() {
-				if let Some(kern) = g.get_mut(&kern_id) {
-					if let Some(r) = kern.reasons.get_mut(&delta.object_id) {
-						r.traversal_count.merge(&incoming);
-						break;
-					}
-				}
-			}
-		}
+	}
+	// The Deps contract lists counter merges among the federation mutations that
+	// must survive a restart, but this handler previously dropped the change in
+	// memory. Persist on a real change only (an idempotent re-delta merges to a
+	// no-op), and only after dropping the write guard above — the save closure
+	// read-locks the graph, so persisting while holding the write lock deadlocks.
+	if changed {
+		d.persist();
 	}
 }
 
@@ -515,6 +526,75 @@ mod tests {
 			None
 		);
 		assert_eq!(validated_delta_value("r1", "obj", u64::MAX), None);
+	}
+
+	fn mk_deps_with_save(
+		graph: Arc<RwLock<GraphGnn>>,
+		calls: Arc<std::sync::atomic::AtomicUsize>,
+	) -> Deps {
+		Deps {
+			graph,
+			node: Node::new("127.0.0.1:0", "testnet", vec![]),
+			queue: None,
+			save: Some(Arc::new(move || {
+				calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			})),
+		}
+	}
+
+	fn delta_msg(target: CrdtTarget, object_id: &str, replica: &str, value: u64) -> GossipMessage {
+		GossipMessage {
+			kind: GossipKind::Delta,
+			id: "delta-test".to_string(),
+			origin: "127.0.0.1:1".to_string(),
+			payload: GossipPayload::CrdtDelta(CrdtDeltaPayload {
+				kern_id: "k".to_string(),
+				object_id: object_id.to_string(),
+				target,
+				replica: replica.to_string(),
+				value,
+			}),
+		}
+	}
+
+	fn graph_with_one_entity(id: &str) -> Arc<RwLock<GraphGnn>> {
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		k.entities.insert(id.to_string(), mk_entity(id, "t", 1.0));
+		g.kerns.insert("k".to_string(), k);
+		Arc::new(RwLock::new(g))
+	}
+
+	#[test]
+	fn crdt_delta_merges_counter_and_persists() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+		let g = graph_with_one_entity("e");
+		let calls = Arc::new(AtomicUsize::new(0));
+		let d = mk_deps_with_save(g.clone(), calls.clone());
+
+		handle_crdt_delta(&d, delta_msg(CrdtTarget::ThoughtAccessCount, "e", "peerR", 7));
+
+		let merged = g.read().unwrap().kerns["k"].entities["e"].access_count.value();
+		assert_eq!(merged, 7, "the remote replica's count is merged in");
+		assert_eq!(
+			calls.load(Ordering::SeqCst),
+			1,
+			"a counter merge persists per the Deps contract (was silently dropped)"
+		);
+	}
+
+	#[test]
+	fn crdt_delta_idempotent_redelta_does_not_persist_again() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+		let g = graph_with_one_entity("e");
+		let calls = Arc::new(AtomicUsize::new(0));
+		let d = mk_deps_with_save(g.clone(), calls.clone());
+
+		// Same replica + value twice: the second max-join is a no-op, so only the
+		// first (changing) merge persists — no needless fsync on idempotent redelta.
+		handle_crdt_delta(&d, delta_msg(CrdtTarget::ThoughtAccessCount, "e", "peerR", 5));
+		handle_crdt_delta(&d, delta_msg(CrdtTarget::ThoughtAccessCount, "e", "peerR", 5));
+		assert_eq!(calls.load(Ordering::SeqCst), 1, "only the changing merge persists");
 	}
 
 	/// A graph holding one OPEN question reason ("r1", to empty) in kern "kq".
