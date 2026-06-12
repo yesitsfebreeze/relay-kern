@@ -366,6 +366,13 @@ impl DiskIndex {
 		self.count == 0
 	}
 
+	/// The id of every vector in the index, in build order. Used by the
+	/// `VectorBackend::Disk` overlay to count live (non-tombstoned) vectors and,
+	/// later, to fold the in-RAM delta back into a rebuilt snapshot.
+	pub fn ids(&self) -> &[String] {
+		&self.ids
+	}
+
 	fn vec_at(&self, i: u32) -> Vec<f32> {
 		let off = i as usize * self.dim * 4;
 		self.vectors[off..off + self.dim * 4]
