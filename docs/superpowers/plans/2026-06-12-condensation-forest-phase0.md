@@ -96,57 +96,95 @@ git commit -m "feat(store): clear_stale_readers to free pinned LMDB pages"
 
 ---
 
-## Task 2: Call `clear_stale_readers` on open
+## Task 2: Open-path hardening — reap stale readers + recover from interrupted compaction
 
 **Files:**
-- Modify: `src/base/store.rs` (`open`, the block at :213-223)
+- Modify: `src/base/store.rs` (`open`, :207-230)
 - Test: `src/base/store.rs`
+
+> **Panel must-fix (Otto):** `kern compact` (Task 5) renames `data → .bloated.bak`
+> then `tmp → data`. A crash *between* those leaves `data` absent — and a naive
+> `Store::open` would CREATE an empty store and lose the graph. So `open` must
+> recover from `<dir>.bloated.bak` when `<dir>` has no data file. This task adds
+> both that recovery (a real red) and the `clear_stale_readers` call.
 
 - [ ] **Step 1: Write the failing test**
 
 ```rust
 #[test]
-fn open_reaps_stale_readers_and_still_serves_data() {
-    let d = tmp();
-    let dir = dir_of(&d);
+fn open_recovers_from_bloated_bak_when_data_missing() {
+    let parent = tmp();
+    let base = dir_of(&parent);
+    let data = format!("{base}/data");
+    let bak = format!("{base}/data.bloated.bak");
+    // Simulate a swap interrupted AFTER data was renamed away: the real store
+    // currently lives only in the .bloated.bak sibling.
     {
-        let s = Store::open(&dir).unwrap();
-        s.put(s.kern, "k", &Sample { name: "v".into(), nums: vec![1.0] }).unwrap();
+        let s = Store::open(&bak).unwrap();
+        s.save_one_kern(&kern_with("k", mk_entity("e", "x", 0.0, EntityKind::Claim))).unwrap();
     }
-    // Reopen: open() must call clear_stale_readers internally and not break I/O.
-    // We assert behavior indirectly — the reopened store reads the prior value.
-    let s2 = Store::open(&dir).unwrap();
-    assert_eq!(s2.get::<Sample>(s2.kern, "k").unwrap().unwrap().name, "v");
+    assert!(!std::path::Path::new(&data).join("data.mdb").exists(), "mid-swap: data absent");
+    // Opening `data` must restore from the backup, not create an empty store.
+    let s = Store::open(&data).unwrap();
+    assert!(s.load_one_kern("k").unwrap().is_some(), "graph recovered from .bloated.bak");
+    assert!(!std::path::Path::new(&bak).join("data.mdb").exists(), "backup consumed by recovery");
 }
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p kern store::tests::open_reaps_stale_readers -- --nocapture`
-Expected: FAIL at first compile only if the call is missing won't fail the
-assertion — so this test guards against regression once the call is added. Run it
-now; it PASSES already (open works). Treat Step 3 as the change and keep this test
-as the regression guard. (If you prefer a strict red: temporarily assert the call
-via a counter; not worth the test seam here.)
+Run: `cargo test -p kern store::tests::open_recovers_from_bloated_bak -- --nocapture`
+Expected: FAIL — `open` creates an empty store, so `load_one_kern("k")` is `None`.
 
-- [ ] **Step 3: Add the call**
+- [ ] **Step 3: Implement recovery + reader reap in `open`**
 
-In `Store::open`, after `wtxn.commit()?;` and before `Ok(Self { … })`, insert:
+Replace the head and tail of `Store::open` in `src/base/store.rs`:
 
 ```rust
-        // Reap reader slots from any process that died holding a read txn, so the
+    pub fn open(dir: &str) -> Result<Self, StoreError> {
+        // Recover from an interrupted `kern compact` swap: if this dir has no data
+        // file but a sibling `<dir>.bloated.bak` does, restore the backup rather
+        // than silently creating an empty store (which would lose the graph).
+        let data_file = Path::new(dir).join("data.mdb");
+        let bak = format!("{dir}.bloated.bak");
+        if !data_file.exists() && Path::new(&bak).join("data.mdb").exists() {
+            tracing::warn!(target: "kern.store", dir, bak = %bak,
+                "restoring store from .bloated.bak after interrupted compaction");
+            let _ = std::fs::remove_dir_all(dir); // drop an empty/half dir if present
+            std::fs::rename(&bak, dir)?;
+        }
+        std::fs::create_dir_all(dir)?;
+        let path = Path::new(dir);
+        // SAFETY: unchanged from before — kern-owned dir, kern-only writers.
+        let env = unsafe {
+            EnvOpenOptions::new().map_size(MAP_SIZE).max_dbs(MAX_DBS).open(path)?
+        };
+        let mut wtxn = env.write_txn()?;
+        let kern = env.create_database::<Str, Bytes>(&mut wtxn, Some(KERN_DB))?;
+        let cold = env.create_database::<Str, Bytes>(&mut wtxn, Some(COLD_DB))?;
+        let meta = env.create_database::<Str, Bytes>(&mut wtxn, Some(META_DB))?;
+        wtxn.commit()?;
+        // Reap reader slots from any process that died holding a read txn so the
         // freelist is reusable from the first write of this session.
         let store = Self { env, kern, cold, meta };
         let _ = store.clear_stale_readers(); // best-effort; never block open
         Ok(store)
+    }
 ```
-
-Replace the existing `Ok(Self { env, kern, cold, meta })` tail with the above.
 
 - [ ] **Step 4: Run tests**
 
 Run: `cargo test -p kern store:: -- --nocapture`
-Expected: PASS (all store tests green).
+Expected: PASS (recovery test green; all prior store tests still green).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/base/store.rs
+git commit -m "feat(store): recover from .bloated.bak + reap stale readers on open"
+```
+
+(Original Step 5 commit message folded here; Task 2 is now a single commit.)
 
 - [ ] **Step 5: Commit**
 
@@ -324,34 +362,48 @@ git commit -m "feat(store): compact_into — MDB_CP_COMPACT to a fresh dir"
 
 - [ ] **Step 1: Write the failing test**
 
+> **Panel fix (Bjorn):** seed/bloat via the PUBLIC `save_all_kerns` (called in a
+> loop with changing kern bodies so old pages pile into the freelist) — `Store::put`
+> and the `kern` field are private to `store.rs` and unreachable from this module.
+> Assert the kern COUNT is preserved (Mara), not just "loads without error".
+
 ```rust
-#[test]
-fn cmd_compact_swaps_in_a_smaller_store_and_keeps_a_backup() {
+#[tokio::test]
+async fn cmd_compact_swaps_in_a_smaller_store_and_keeps_a_backup() {
+    use crate::base::store::Store;
+    use crate::base::types::Kern;
+    use crate::quant::QuantizationMode;
+    use std::collections::HashMap;
+
     let (_dir, cfg) = temp_cfg();
     let data = cfg.data_dir.clone();
+    // Seed a known kern set, then rewrite it many times so the freelist bloats
+    // (each save_all_kerns COWs every row; old pages are freed but the file grows).
+    let mut kerns = HashMap::new();
+    kerns.insert("root".to_string(), Kern::new("root", ""));
+    for i in 0..40 { kerns.insert(format!("k{i}"), Kern::new(&format!("k{i}"), "root")); }
     {
-        // Seed + bloat the configured data dir.
-        let s = crate::base::store::Store::open(&data).unwrap();
+        let s = Store::open(&data).unwrap();
         for round in 0..30 {
+            // Mutate a field each round so the encoded bytes differ -> new pages.
             for i in 0..40 {
-                s.put_kern_test(&format!("k{i}"), round, i); // helper below
+                kerns.get_mut(&format!("k{i}")).unwrap().anchor_text = format!("r{round}");
             }
+            s.save_all_kerns(&kerns, "net", QuantizationMode::Int8).unwrap();
         }
     }
-    let before = crate::base::store::Store::open(&data).unwrap().bloat_stats().unwrap().real_disk_bytes;
-    cmd_compact(&cfg, None);
-    let after = crate::base::store::Store::open(&data).unwrap().bloat_stats().unwrap().real_disk_bytes;
-    assert!(after <= before, "data dir shrank or held");
+    let before = Store::open(&data).unwrap().bloat_stats().unwrap().real_disk_bytes;
+
+    cmd_compact(&cfg, None).await; // no daemon in the temp dir -> probe Errs -> proceeds
+
+    let s2 = Store::open(&data).unwrap();
+    let after = s2.bloat_stats().unwrap().real_disk_bytes;
+    let (loaded, _, _) = s2.load_all_kerns().unwrap();
+    assert!(after <= before, "data dir shrank or held ({after} <= {before})");
+    assert_eq!(loaded.len(), 41, "all 41 kerns (root + 40) preserved through compaction");
     assert!(std::path::Path::new(&format!("{data}.bloated.bak")).exists(), "backup retained");
-    // Data intact:
-    let g = load_graph(&cfg); // load_graph opens the (now compacted) store
-    let _ = g; // presence-only: load must not error on the swapped store
 }
 ```
-
-> If `put_kern_test` doesn't exist, inline the bloat loop with real `Store::put`
-> over `s.kern` as in Task 4's test instead of a helper — do not add test-only
-> public methods to `Store`. (Author's note: prefer the inline form.)
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -366,13 +418,25 @@ Add to `src/commands/admin.rs`:
 /// Offline compaction: shrink a bloated LMDB env by copying only live pages into
 /// a fresh dir and atomically swapping it in, keeping the old dir as a
 /// `*.bloated.bak`. MUST run with the cwd daemon stopped — the daemon holds the
-/// env mmap and (on Windows) the dir rename will be denied. On a locked dir the
-/// swap fails loudly and the temp copy is cleaned up; nothing is lost.
-pub(super) fn cmd_compact(cfg: &crate::config::Config, dir: Option<&str>) {
+/// env mmap, so swapping under it would diverge (Linux: rename succeeds, daemon
+/// keeps writing the old inode) or be denied (Windows: rename fails). We refuse
+/// up front via a kern.sock liveness probe rather than relying on rename behavior.
+pub(super) async fn cmd_compact(cfg: &crate::config::Config, dir: Option<&str>) {
     use std::path::Path;
     let data = dir.map(str::to_string).unwrap_or_else(|| cfg.data_dir.clone());
     let tmp = format!("{data}.compact.tmp");
     let bak = format!("{data}.bloated.bak");
+
+    // Panel must-fix (Otto, cross-platform): refuse if a daemon for this cwd is
+    // live. The daemon binds the per-user `kern.sock` singleton; a successful
+    // connect means it owns the store. Reuse the SAME endpoint constructor
+    // `run_server` binds with at `src/commands.rs:629` (confirm the symbol there —
+    // e.g. `crate::rpc::kern_endpoint()` — and connect via
+    // `crate::trnsprt::typed::connect_kern(&ep).await`).
+    if crate::trnsprt::typed::connect_kern(&crate::rpc::kern_endpoint()).await.is_ok() {
+        eprintln!("compact: a kern daemon is running for this cwd — stop it first (it holds the store).");
+        return;
+    }
 
     let _ = std::fs::remove_dir_all(&tmp); // clear any stale temp
 
@@ -433,11 +497,17 @@ In `src/commands.rs`, add to the `Commands` enum next to `Compress` (~:175):
     },
 ```
 
-And to the dispatch `match` next to `Compress` (~:413):
+And to the dispatch `match` next to `Compress` (~:413). `cmd_compact` is `async`
+(it probes kern.sock), so it is `.await`ed — the dispatch fn is already `async`
+(see `Commands::Profile { … } => profile_cmd::cmd_profile(…).await`):
 
 ```rust
-        Commands::Compact { path } => admin::cmd_compact(cfg, path.as_deref()),
+        Commands::Compact { path } => admin::cmd_compact(cfg, path.as_deref()).await,
 ```
+
+> Test note: the `cmd_compact_swaps_…` unit test must therefore be a
+> `#[tokio::test]` and `cmd_compact(&cfg, None).await`. The probe returns `Err`
+> (no daemon in the test temp dir), so compaction proceeds.
 
 - [ ] **Step 5: Run test + build**
 
@@ -577,12 +647,21 @@ kern health                         # bloat ~x1, MB on disk collapses (~50 MB)
 Expected: second `health` shows live≈disk; `.kern/data.bloated.bak` present.
 Then start the daemon; confirm recall works and no `MDB_MAP_FULL` on save.
 
-- [ ] **Step 3: Negative — daemon-up refusal**
+- [ ] **Step 3: Negative — daemon-up refusal (cross-platform)**
 
 With the daemon **running**, `kern compact` must print the "stop the daemon first"
-error and leave `.kern/data` untouched (no partial swap, temp cleaned).
+error (from the kern.sock liveness probe, not a rename failure) and leave
+`.kern/data` untouched (no partial swap, temp cleaned). Verify on both a Unix
+socket and the Windows named-pipe endpoint if available.
 
-- [ ] **Step 4: Commit any fixes, then hand off to `/personas` for plan review.**
+- [ ] **Step 4: Crash-recovery check (interrupted swap)**
+
+Simulate the swap interruption: stop the daemon, manually `mv .kern/data
+.kern/data.bloated.bak` (leaving no `.kern/data`), then start the daemon. It must
+**restore from `.bloated.bak`** (Task 2 recovery) and come up with the full graph,
+not an empty store. Confirm `kern health` shows the original kern count.
+
+- [ ] **Step 5: Commit any fixes, then hand off to `/personas` for plan review.**
 
 ---
 
@@ -590,13 +669,20 @@ error and leave `.kern/data` untouched (no partial swap, temp cleaned).
 
 - **Spec coverage:** §Component 5 (reader-check live + daemon-down compaction) →
   Tasks 1,2,4,5,6. Bloat observability via `kern health` → Tasks 3,7. The "no live
-  dir swap" constraint → Task 5 refusal path + Task 8 Step 3. Forest/condensation
-  (Phases 1-3) intentionally out of scope.
-- **Placeholders:** none — every step has real code/commands. The one helper note
-  in Task 5 Step 1 explicitly instructs the inline form (no test-only public API).
+  dir swap" constraint → Task 5 kern.sock refusal + Task 8 Steps 3-4. Crash-recovery
+  on interrupted swap → Task 2. Forest/condensation (Phases 1-3) intentionally out
+  of scope.
+- **Panel must-fixes folded in (round 2):** (1) recover-on-open from `.bloated.bak`
+  (Task 2) so a mid-swap crash never boots an empty store; (2) cross-platform
+  daemon-liveness probe via kern.sock (Task 5) instead of relying on rename-fails;
+  (3) Task 5 test seeds via PUBLIC `save_all_kerns` (private `put`/`kern` are
+  unreachable); (4) Task 2 is now a real red (recovery), not a fake-pass.
+- **Placeholders:** none. The one symbol to confirm at implementation —
+  `crate::rpc::kern_endpoint()` (Task 5) — is pinned to its source
+  (`src/commands.rs:629`, where `run_server` binds the same endpoint).
 - **Type consistency:** `BloatStats { real_disk_bytes, live_bytes }` + `ratio()`
   used identically in Tasks 3, 5, 7. `compact_into(out_dir)`, `clear_stale_readers`,
-  `bloat_stats` names match across tasks. `Store.kern` field + `put/get` already
-  exist (store.rs).
+  `bloat_stats` names match across tasks. `cmd_compact` is `async` (Task 5) → dispatch
+  `.await`s it (Task 5 Step 4) and the unit test is `#[tokio::test]`.
 - **Windows note:** `kern compact` is the only shrink path; the daemon never swaps
-  a live dir. This is the load-bearing correction from the persona panel.
+  a live dir. Load-bearing correction from the persona panel.
