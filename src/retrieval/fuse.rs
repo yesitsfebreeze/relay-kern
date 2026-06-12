@@ -22,18 +22,30 @@ pub fn rrf(
 			*agg.entry(hit.entity_id.clone()).or_insert(0.0) += contrib;
 		}
 	}
+	if top_k == 0 {
+		return Vec::new();
+	}
 	let mut out: Vec<EntityHit> = agg.into_iter().map(EntityHit::from).collect();
 	// Primary key: fused score, descending. Secondary key: entity_id, ascending —
-	// a deliberate STABLE, deterministic tiebreak (HashMap iteration order is not),
-	// so equal-score entities always sort the same way across runs. This keeps
-	// recall reproducible and tests deterministic.
-	out.sort_by(|a, b| {
+	// a deliberate deterministic tiebreak (HashMap iteration order is not), so
+	// equal-score entities always sort the same way across runs. This keeps recall
+	// reproducible and tests deterministic. Because `agg`'s keys are unique entity
+	// ids, this is a STRICT total order: no two distinct entries compare Equal.
+	let cmp = |a: &EntityHit, b: &EntityHit| {
 		b.score
 			.partial_cmp(&a.score)
 			.unwrap_or(std::cmp::Ordering::Equal)
 			.then_with(|| a.entity_id.cmp(&b.entity_id))
-	});
-	out.truncate(top_k);
+	};
+	// Only top_k of a potentially large fused union is delivered, so partition the
+	// top_k into [0, top_k) in O(n) average with select_nth instead of fully
+	// sorting all n in O(n log n), then order just those survivors. The strict
+	// total order makes this byte-identical to a full sort + truncate.
+	if top_k < out.len() {
+		out.select_nth_unstable_by(top_k - 1, &cmp);
+		out.truncate(top_k);
+	}
+	out.sort_by(&cmp);
 	out
 }
 
@@ -90,6 +102,19 @@ mod tests {
 		let out = rrf(&lists, &[1.0], 60.0, 10); // second list defaults to 1.0
 		let both = rrf(&lists, &[1.0, 1.0], 60.0, 10);
 		assert_eq!(out[0].score, both[0].score, "missing weight == 1.0");
+	}
+
+	#[test]
+	fn equal_score_tie_broken_by_id_ascending_under_top_k() {
+		// "a" and "b" each rank 1 in their own list -> identical fused score. With
+		// top_k=1 the select_nth partition must still resolve the tie by id
+		// ascending and keep "a"; a non-total-order comparator could keep "b".
+		let la = [hit("b")];
+		let lb = [hit("a")];
+		let lists: Vec<&[EntityHit]> = vec![&la, &lb];
+		let out = rrf(&lists, &[1.0, 1.0], 60.0, 1);
+		assert_eq!(out.len(), 1, "top_k=1 keeps a single hit");
+		assert_eq!(out[0].entity_id, "a", "tie resolved to id-ascending winner under truncation");
 	}
 
 	#[test]
