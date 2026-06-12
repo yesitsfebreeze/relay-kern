@@ -93,7 +93,11 @@ snapshots — since that is the largest, most-blocking cluster of ❌.
 
 ### Tier 0 — measure first (unblocks everything)
 - [ ] **Benchmark harness vs Qdrant** — recall@k + p50/p95/p99 latency + RPS + RAM on a shared dataset (start from `retrieval_bench`). Measure, don't assume.
-- [ ] Wire `search_all_filtered` into the live query path — filtered ANN end-to-end, kill post-filtering.
+- [x] Wire `search_all_filtered` into the live query path — DONE for all three seed
+  sources: dense (`5dc6958`), importance (`47ca318`), lexical (`257a10d`). Each is
+  gated on `QueryOptions::is_active` (unfiltered queries byte-identical) and shares
+  the one `score::matches_filter` predicate. `apply_query_options` stays as the final
+  backstop. End-to-end recall@10 A/B confirms the fewer-than-k recovery (`9386de0`).
 - [x] Profile query latency — `kern profile` (`profile_cmd`) breaks the timeline into graph (sub-ms) vs LLM hyde/answer/distill (~12–16s each). Confirmed: the LLM path is the delay, not the index.
 
 ### Tier 1 — production-DB tier (largest ❌ cluster)
@@ -164,11 +168,13 @@ B2. **RRF hybrid fusion (DONE at the answer layer)** — `fuse::rrf` (Σ wᵢ/(k
     `answer.rs`, with a `SweepParam::RrfK` bench knob. *Remaining:* the dense seed
     merge `merge_hits` still blends raw scores (`0.4c+0.6g`) — fragile across
     scales; move it onto RRF too (+sparse lists later).
-B3. **Filtered ANN end-to-end** — single source of truth: the **Tier-0** checkbox
-    "Wire `search_all_filtered` into the live query path". `search_all_filtered`
-    exists + is tested (`base/search.rs`) but `seed.rs` still calls the unfiltered
-    `search_all_unlocked`; wiring it kills post-filtering's fewer-than-k bug on
-    sparse matches. (Status tracked once, in Tier-0, so the two can't drift.)
+B3. **Filtered ANN end-to-end (DONE for the seed sources)** — `seed.rs` now filters
+    during retrieval whenever `QueryOptions::is_active`: the dense path via
+    `search_all_filtered`, `seed_important` via a pre-cosine `matches_filter` gate,
+    and `seed_lexical` via `LexicalIndex::search_filtered` (filter before the BM25
+    truncate). Graph expansion runs on the already-filtered seed; `apply_query_options`
+    remains the final backstop. This kills post-filtering's fewer-than-k loss on
+    sparse matches — validated by an end-to-end recall@10 A/B (`9386de0`).
 
 ### Stage C — Robustness / durability (don't lose data, recover fast)
 C1. **Snapshots / restore** — reuse `persist::save_all` under a read lock into a
@@ -223,7 +229,7 @@ Status markers below were checked against the **working tree atop `9683c5c`**
 | A1 `answer:false` sub-ms path (DONE) | `answer_llm_args` + test `answer_false_passes_no_llm_or_embedder` (`tools_query.rs`) |
 | A3 latency bundle (PARTIAL) | `complete_stream`/`params.stream`, `*_NUM_CTX`, `*_KEEP_ALIVE`, `num_gpu:0` (`llm.rs`) |
 | Tier-0 profiling (DONE) | `profile_cmd` / `kern profile` |
-| `search_all_filtered` NOT wired | defined+tested `base/search.rs`; `seed.rs` still calls `search_all_unlocked` |
+| `search_all_filtered` WIRED (dense+importance+lexical) | `seed.rs` filters all three seed sources on `is_active`; e2e recall@10 A/B `9386de0` (was: unwired atop `9683c5c`) |
 | Snapshots / WAL / restore = ❌ | no backup/restore/WAL fns in `persist.rs` |
 | Recommend/Discover/distance-matrix = ❌ | no such fns repo-wide |
 | REST surface qualifier | viewer axum routes (`viewer/mod.rs`) + `kern_rpc`; no public REST/gRPC/SDK |
