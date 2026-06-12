@@ -129,7 +129,7 @@ pub fn compare(backends: &mut [Box<dyn VectorBackend>], corpus: &Corpus) -> Vec<
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::bench_support::backend::KernBackend;
+	use crate::bench_support::backend::{BruteForceBackend, KernBackend};
 
 	fn doc(id: &str, v: Vec<f64>, kind: EntityKind) -> Doc {
 		Doc { id: id.into(), vector: v, kind: Some(kind) }
@@ -179,6 +179,25 @@ mod tests {
 			r[0].mean_recall10
 		);
 		assert!(r[0].vector_bytes > 0);
+	}
+
+	#[test]
+	fn kern_ann_recall_tracks_exact_brute_force() {
+		// Brute force is exact NN ground truth (the ceiling); kern is approximate
+		// HNSW. On this scale kern's recall@10 should track exact closely -- the
+		// "keep the DiskANN recall@k edge" check, now measured by two real backends.
+		let corpus = Corpus::synthetic(300, 40, 99);
+		let mut kern: Vec<Box<dyn VectorBackend>> = vec![Box::new(KernBackend::new())];
+		let mut brute: Vec<Box<dyn VectorBackend>> = vec![Box::new(BruteForceBackend::new())];
+		let kr = compare(&mut kern, &corpus)[0].clone();
+		let br = compare(&mut brute, &corpus)[0].clone();
+		assert!(br.mean_recall10 > 0.0, "exact search finds the expected docs");
+		assert!(
+			kr.mean_recall10 >= 0.8 * br.mean_recall10,
+			"kern HNSW recall@10 {} should track exact {} (>=80%)",
+			kr.mean_recall10,
+			br.mean_recall10
+		);
 	}
 
 	#[test]

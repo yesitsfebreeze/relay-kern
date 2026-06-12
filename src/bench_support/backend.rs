@@ -11,8 +11,10 @@
 //! adapter and the multi-backend `compare` harness are later phases.
 
 use crate::base::graph::GraphGnn;
+use crate::base::math::cosine;
 use crate::base::search::{search_all_filtered, search_all_unlocked};
 use crate::base::types::{Entity, EntityKind, Kern};
+use crate::base::util::cmp_rank;
 
 /// A pre-embedded corpus document. `vector` is kern-native `f64`; a future Qdrant
 /// adapter converts to `f32` at its own boundary so both index the same values.
@@ -103,6 +105,50 @@ impl VectorBackend for KernBackend {
 	}
 }
 
+/// Exact brute-force vector search (full scan, cosine) — the ground-truth backend.
+/// Comparing kern (approximate HNSW) against this measures how much recall kern's
+/// ANN gives up versus exact nearest-neighbour, the "keep the DiskANN recall@k
+/// edge" check. O(n) per query, so it is a baseline, not a contender.
+#[derive(Default)]
+pub struct BruteForceBackend {
+	docs: Vec<Doc>,
+}
+
+impl BruteForceBackend {
+	pub fn new() -> Self {
+		Self::default()
+	}
+}
+
+impl VectorBackend for BruteForceBackend {
+	fn name(&self) -> &str {
+		"brute"
+	}
+
+	fn index(&mut self, docs: &[Doc]) {
+		self.docs = docs.to_vec();
+	}
+
+	fn query(&self, vec: &[f64], k: usize, kind_filter: Option<EntityKind>) -> Vec<QueryHit> {
+		let mut hits: Vec<QueryHit> = self
+			.docs
+			.iter()
+			.filter(|d| kind_filter.is_none_or(|kf| d.kind == Some(kf)))
+			.filter(|d| !d.vector.is_empty() && d.vector.len() == vec.len())
+			.map(|d| QueryHit { id: d.id.clone(), score: cosine(vec, &d.vector) })
+			.collect();
+		// Same deterministic ranking as the rest of the stack: score desc, id asc.
+		hits.sort_by(|a, b| cmp_rank(a.score, &a.id, b.score, &b.id));
+		hits.truncate(k);
+		hits
+	}
+
+	fn vector_bytes(&self) -> usize {
+		let dim = self.docs.iter().find(|d| !d.vector.is_empty()).map_or(0, |d| d.vector.len());
+		self.docs.iter().filter(|d| !d.vector.is_empty()).count() * dim * std::mem::size_of::<f64>()
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -124,6 +170,23 @@ mod tests {
 		assert_eq!(hits[0].id, "a", "exact match is nearest: {hits:?}");
 		assert!(hits[0].score >= hits[1].score, "ranked by score descending");
 		assert!(b.vector_bytes() > 0, "reports a non-zero vector footprint");
+	}
+
+	#[test]
+	fn brute_force_backend_returns_exact_nearest() {
+		let mut b = BruteForceBackend::new();
+		b.index(&[
+			doc("a", vec![1.0, 0.0], EntityKind::Fact),
+			doc("b", vec![0.0, 1.0], EntityKind::Claim),
+			doc("c", vec![0.9, 0.1], EntityKind::Claim),
+		]);
+		let hits = b.query(&[1.0, 0.0], 3, None);
+		assert_eq!(hits[0].id, "a", "the identical vector is the exact nearest");
+		assert_eq!(hits[1].id, "c", "then the close one");
+		assert!(hits[0].score >= hits[1].score && hits[1].score >= hits[2].score, "sorted desc");
+		// kind filter applies to the exact scan too.
+		let f = b.query(&[1.0, 0.0], 5, Some(EntityKind::Fact));
+		assert!(!f.is_empty() && f.iter().all(|h| h.id == "a"), "only the Fact: {f:?}");
 	}
 
 	#[test]
