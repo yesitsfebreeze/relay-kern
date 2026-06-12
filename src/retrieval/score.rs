@@ -206,32 +206,6 @@ pub fn commit_access_with_half_life(results: &mut [ScoredEntity], half_life_secs
 	}
 }
 
-pub fn softmax(values: &[f64], temperature: f64) -> Vec<f64> {
-	let n = values.len();
-	if n == 0 {
-		return Vec::new();
-	}
-	if !temperature.is_finite() || temperature <= 0.0 {
-		return vec![1.0 / n as f64; n];
-	}
-	let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-	if !max.is_finite() {
-		return vec![1.0 / n as f64; n];
-	}
-	let mut out: Vec<f64> = values
-		.iter()
-		.map(|v| ((v - max) / temperature).exp())
-		.collect();
-	let sum: f64 = out.iter().sum();
-	if sum <= 0.0 || !sum.is_finite() {
-		return vec![1.0 / n as f64; n];
-	}
-	for x in out.iter_mut() {
-		*x /= sum;
-	}
-	out
-}
-
 #[cfg(test)]
 mod query_filter_tests {
 	use super::*;
@@ -420,35 +394,5 @@ mod query_filter_tests {
 		assert!((results[1].score - 1.0).abs() < 1e-9, "claim got {}", results[1].score);
 	}
 
-	// ---- softmax edge cases ------------------------------------------------
-
-	#[test]
-	fn softmax_zero_or_invalid_temperature_is_uniform() {
-		assert_eq!(softmax(&[1.0, 2.0, 3.0], 0.0), vec![1.0 / 3.0; 3]);
-		assert_eq!(softmax(&[1.0, 2.0], -1.0), vec![0.5, 0.5]);
-		assert_eq!(softmax(&[1.0, 2.0], f64::NAN), vec![0.5, 0.5]);
-	}
-
-	#[test]
-	fn softmax_non_finite_values_fall_back_to_uniform() {
-		// +inf makes `max` non-finite -> uniform.
-		assert_eq!(softmax(&[1.0, f64::INFINITY, 2.0], 1.0), vec![1.0 / 3.0; 3]);
-		// A NaN value leaves max finite (f64::max skips NaN) but the exp/sum goes
-		// NaN -> non-finite sum -> uniform.
-		assert_eq!(softmax(&[1.0, f64::NAN, 2.0], 1.0), vec![1.0 / 3.0; 3]);
-	}
-
-	#[test]
-	fn softmax_empty_input_is_empty() {
-		assert!(softmax(&[], 1.0).is_empty());
-	}
-
-	#[test]
-	fn softmax_normal_case_sums_to_one_and_is_monotonic() {
-		let out = softmax(&[1.0, 2.0, 3.0], 1.0);
-		let sum: f64 = out.iter().sum();
-		assert!((sum - 1.0).abs() < 1e-9, "probabilities sum to 1");
-		assert!(out[2] > out[1] && out[1] > out[0], "higher logit -> higher prob");
-	}
 }
 
