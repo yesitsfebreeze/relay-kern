@@ -200,6 +200,85 @@ mod tests {
 		);
 	}
 
+	/// Fraction of queries whose expected target lands in the backend's top-10.
+	fn mean_target_recall_10(
+		queries: &[CompareQuery],
+		mut top10: impl FnMut(&CompareQuery) -> Vec<String>,
+	) -> f64 {
+		if queries.is_empty() {
+			return 0.0;
+		}
+		let hits = queries
+			.iter()
+			.filter(|q| {
+				let top = top10(q);
+				q.expected_ids.iter().any(|e| top.contains(e))
+			})
+			.count();
+		hits as f64 / queries.len() as f64
+	}
+
+	// Build a GraphGnn whose entity index is spilled to a DiskANN snapshot
+	// (disk_threshold = 0 forces the spill), exercising the real rebuild_index
+	// routing rather than DiskIndex in isolation.
+	fn disk_backed_graph(docs: &[Doc], dir: &std::path::Path) -> crate::base::graph::GraphGnn {
+		use crate::base::graph::GraphGnn;
+		use crate::base::types::{Entity, Kern};
+		let mut g = GraphGnn::new();
+		g.data_dir = dir.to_string_lossy().into_owned();
+		let mut kern = Kern::new("k", "");
+		for d in docs {
+			kern.entities.insert(
+				d.id.clone(),
+				Entity {
+					id: d.id.clone(),
+					vector: d.vector.clone(),
+					score: 0.5,
+					kind: d.kind.unwrap_or(EntityKind::Claim),
+					..Default::default()
+				},
+			);
+		}
+		g.kerns.insert("k".to_string(), kern);
+		g.set_disk_threshold(0); // any non-empty corpus spills
+		g.rebuild_index();
+		g
+	}
+
+	#[test]
+	fn disk_spilled_path_recall_tracks_the_in_ram_index() {
+		// I7 regression: a disk-backed graph (entity_idx spilled to a DiskANN
+		// snapshot) must find the target doc in its top-10 about as often as the
+		// in-RAM HNSW over the same corpus — the disk tier must not silently lose
+		// recall as the spill path evolves.
+		let corpus = Corpus::synthetic(300, 40, 99);
+
+		let mut kern = KernBackend::new();
+		kern.index(&corpus.docs);
+		let ram_recall = mean_target_recall_10(&corpus.queries, |q| {
+			kern.query(&q.vector, 10, None).into_iter().map(|h| h.id).collect()
+		});
+
+		let dir = tempfile::tempdir().unwrap();
+		let g = disk_backed_graph(&corpus.docs, dir.path());
+		assert!(
+			matches!(g.entity_idx, crate::base::vector_backend::VectorBackend::Disk { .. }),
+			"corpus spilled to the disk backend"
+		);
+		let disk_recall = mean_target_recall_10(&corpus.queries, |q| {
+			crate::base::search::search_all_unlocked(&g, &q.vector, 10)
+				.into_iter()
+				.map(|h| h.entity_id)
+				.collect()
+		});
+
+		assert!(disk_recall > 0.3, "disk recall@10 should be substantial, got {disk_recall}");
+		assert!(
+			disk_recall >= 0.8 * ram_recall,
+			"disk recall@10 {disk_recall} should track in-RAM {ram_recall} (>=80%)"
+		);
+	}
+
 	#[test]
 	fn synthetic_corpus_is_deterministic_for_a_seed() {
 		let a = Corpus::synthetic(20, 5, 7);
