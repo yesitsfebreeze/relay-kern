@@ -18,6 +18,7 @@
 
 pub mod build;
 pub mod embed;
+pub mod latency;
 pub mod locomo;
 pub mod locomo_run;
 pub mod ndcg;

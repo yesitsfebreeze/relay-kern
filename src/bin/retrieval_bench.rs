@@ -33,6 +33,10 @@ struct Args {
 	/// Restrict the run to queries whose declared `mode` equals this (e.g. hybrid).
 	#[arg(long)]
 	mode: Option<String>,
+	/// Measure graph-retrieval latency (p50/p95/p99 over the trace, LLM-free)
+	/// instead of scoring recall/NDCG. Warmup + timed iterations per query.
+	#[arg(long)]
+	latency: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,6 +55,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	}
 
 	let g = build_graph(&t);
+
+	if args.latency {
+		let r = kern::bench_support::latency::measure_latency(&g, &RetrievalConfig::default(), &t, 3, 50);
+		println!("trace: {}   samples: {}", r.trace_name, r.samples);
+		println!(
+			"retrieval latency (ms):  mean={:.3}  p50={:.3}  p95={:.3}  p99={:.3}",
+			r.mean_ms, r.p50_ms, r.p95_ms, r.p99_ms
+		);
+		return Ok(());
+	}
 
 	match args.sweep {
 		None => {
