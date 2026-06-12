@@ -194,6 +194,35 @@ impl GraphGnn {
 		}
 	}
 
+	/// Snapshot every searchable resident entity's content vector into a
+	/// disk-resident Vamana index under `dir`, mirroring EXACTLY the membership
+	/// of [`entity_idx`](Self::entity_idx): Superseded entities are skipped (same
+	/// rule as [`index_kern_into`]) and vector-less entities are skipped. Entities
+	/// are keyed and emitted in id order, so a `f64`-snapshot of a fixed resident
+	/// set yields a byte-reproducible index (DiskANN's build is seeded). Vectors
+	/// are narrowed `f64 -> f32` at the boundary — lossy but consistent with the
+	/// int8-on-disk storage posture; ANN recall is unaffected in practice.
+	///
+	/// This is the BUILD half of the DiskANN integration (increment I2 of
+	/// `docs/superpowers/plans/2026-06-12-diskann-wiring.md`). Search routing
+	/// through the snapshot lands in a later increment; this method has no effect
+	/// on the live search path. Returns the number of vectors written.
+	pub fn build_entity_disk_index(&self, dir: &std::path::Path) -> std::io::Result<usize> {
+		// BTreeMap: dedup by id (mirroring the id-keyed HnswIndex) AND deterministic
+		// id ordering so the seeded Vamana build is reproducible across runs.
+		let mut items: std::collections::BTreeMap<String, Vec<f32>> =
+			std::collections::BTreeMap::new();
+		for kern in self.kerns.values() {
+			for t in kern.entities.values() {
+				if t.status != EntityStatus::Superseded && t.has_vector() {
+					items.insert(t.id.clone(), t.vector.iter().map(|&x| x as f32).collect());
+				}
+			}
+		}
+		let items: Vec<(String, Vec<f32>)> = items.into_iter().collect();
+		super::diskann::build_and_save(dir, &items, super::diskann::Params::default())
+	}
+
 	pub fn get(&mut self, id: &str) -> Option<&Kern> {
 		if self.kerns.contains_key(id) {
 			if let Some(k) = self.kerns.get_mut(id) {
@@ -544,6 +573,57 @@ mod tests {
 			.collect();
 		assert!(hits.contains(&"active".to_string()), "active entity is indexed");
 		assert!(!hits.contains(&"dead".to_string()), "superseded entity excluded from rebuilt index");
+	}
+
+	#[test]
+	fn disk_index_snapshot_mirrors_in_ram_membership_and_ranking() {
+		// I2: build_entity_disk_index must snapshot EXACTLY what entity_idx holds —
+		// active+vector-bearing entities, Superseded excluded — and a DiskIndex
+		// opened from it must rank consistently with the in-RAM HNSW (the snapshot
+		// is a faithful disk-resident substitute, the basis for later search
+		// routing). Vectors are well-separated (distinct per-dim frequencies) so the
+		// nearest-neighbour structure is unambiguous despite int8 quant noise in the
+		// in-RAM index vs raw f32 on disk.
+		use crate::base::diskann::DiskIndex;
+		let mut g = GraphGnn::new();
+		let kid = g.root.id.clone();
+		let vec_of = |i: usize| -> Vec<f64> {
+			(0..8).map(|j| ((i as f64) * (0.13 + 0.07 * j as f64)).sin()).collect()
+		};
+		if let Some(k) = g.get_mut(&kid) {
+			for i in 0..80 {
+				k.entities.insert(
+					format!("e{i}"),
+					Entity { id: format!("e{i}"), vector: vec_of(i), status: EntityStatus::Active, ..Default::default() },
+				);
+			}
+			// Superseded entity must never enter the snapshot.
+			k.entities.insert(
+				"dead".into(),
+				Entity { id: "dead".into(), vector: vec_of(3), status: EntityStatus::Superseded, ..Default::default() },
+			);
+		}
+		g.rebuild_index();
+
+		let dir = tempfile::tempdir().unwrap();
+		let written = g.build_entity_disk_index(dir.path()).unwrap();
+		assert_eq!(written, 80, "snapshot holds all 80 active entities; superseded excluded");
+
+		let disk = DiskIndex::open(dir.path()).unwrap();
+		let q64 = vec_of(40);
+		let q32: Vec<f32> = q64.iter().map(|&x| x as f32).collect();
+
+		let ram: Vec<String> = crate::base::search::search_all_unlocked(&g, &q64, 10)
+			.into_iter().map(|h| h.entity_id).collect();
+		let disk_hits: Vec<String> = disk.search_hits(&q32, 10, 96).into_iter().map(|h| h.id).collect();
+
+		assert_eq!(disk_hits.first().map(String::as_str), Some("e40"), "indexed query point ranks first on disk");
+		assert_eq!(ram.first().map(String::as_str), Some("e40"), "indexed query point ranks first in RAM");
+		assert!(!disk_hits.contains(&"dead".to_string()), "superseded entity absent from disk snapshot");
+
+		let ram_set: std::collections::HashSet<&String> = ram.iter().collect();
+		let overlap = disk_hits.iter().filter(|id| ram_set.contains(id)).count();
+		assert!(overlap >= 6, "disk vs in-RAM top-10 overlap too low: {overlap}/10 (ram={ram:?} disk={disk_hits:?})");
 	}
 
 	#[test]

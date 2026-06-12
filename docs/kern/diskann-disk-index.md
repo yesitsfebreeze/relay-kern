@@ -1,7 +1,26 @@
 # DiskANN-style disk-resident index — design
 
-**Status:** design / scoping. Not implemented. Targets the scale ceiling, not a
-first-run blocker — most kerns are small and fully in-RAM today.
+**Status (updated 2026-06-12):** the standalone Vamana index IS implemented and
+tested (`src/base/diskann.rs`: `build_and_save` + mmap `DiskIndex::open`/`search`,
+recall@10 ≥ 0.90 vs brute force), but **not yet wired into the live search path**
+(`src/base/search.rs`). Decision: KEEP and WIRE — it is the architecture's
+designated answer to the unbounded resident-set ceiling (see
+`src/config/graph.rs`: huge-corpus scaling is "the DiskANN index's job, not this
+cap"; `src/base/constants.rs`: no entity-eviction cap ships, so a resident kern's
+in-RAM HNSW grows unbounded). Execution plan:
+`docs/superpowers/plans/2026-06-12-diskann-wiring.md`.
+
+> **Reality drift since this doc was written.** The original Phase-1 target below
+> (replace `cold.rs`'s O(n) JSONL scan) is OBSOLETE: `cold.rs` and `persist.rs`
+> were replaced by an LMDB store (`src/base/store.rs`) with int8-on-disk vectors,
+> and `Store::cold_search` is now a BOUNDED scan (capped by `COLD_MAX_ENTRIES`),
+> so the cold tier no longer degrades linearly. What DiskANN fixes today is the
+> **hot/resident** ceiling: per loaded kern the in-memory `HnswIndex` holds every
+> entity vector on the heap and is rebuilt on load, so RSS and load-time grow with
+> the kern without bound. PQ (vectors compressed in RAM) is still unbuilt; the
+> current `DiskIndex` mmaps full f32 vectors, which already removes them from the
+> resident heap — PQ is a later RAM-of-codes optimization, not a prerequisite.
+> The "ceiling today" list below is retained for historical context.
 
 ## The ceiling today
 

@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 
+use crate::base::hnsw::HnswHit;
+
 /// Adjacency padding marker: "no neighbour in this slot".
 const SENTINEL: u32 = u32::MAX;
 
@@ -397,6 +399,49 @@ impl DiskIndex {
 			.map(|(d, i)| (self.ids[i as usize].clone(), d))
 			.collect()
 	}
+
+	/// Like [`search`](Self::search) but returns [`HnswHit`]s carrying a cosine
+	/// *similarity* score (`1.0 - distance`), matching the convention of
+	/// [`crate::base::hnsw::HnswIndex::search`]. This lets disk-resident and
+	/// in-RAM hits fuse in one ranking (see `base::search::merge_hits`). Nearest
+	/// first. The `f32` on-disk distance is widened to `f64` to match `HnswHit`.
+	pub fn search_hits(&self, query: &[f32], k: usize, search_l: usize) -> Vec<HnswHit> {
+		self.search(query, k, search_l)
+			.into_iter()
+			.map(|(id, dist)| HnswHit {
+				id,
+				score: 1.0 - dist as f64,
+			})
+			.collect()
+	}
+
+	/// Filtered variant of [`search_hits`](Self::search_hits): only ids passing
+	/// `keep` are returned. The candidate pool is widened to `search_l.max(k)`
+	/// before filtering so a sparse filter still yields up to `k` survivors
+	/// (post-filtering a fixed top-`k` would under-return). Recall under a very
+	/// selective `keep` scales with `search_l` — widen it when the filter is
+	/// rare. Mirrors `base::search::search_all_filtered`'s full-`k` contract.
+	pub fn search_hits_filtered(
+		&self,
+		query: &[f32],
+		k: usize,
+		search_l: usize,
+		keep: &dyn Fn(&str) -> bool,
+	) -> Vec<HnswHit> {
+		if k == 0 {
+			return Vec::new();
+		}
+		let want = search_l.max(k);
+		self.search(query, want, want)
+			.into_iter()
+			.filter(|(id, _)| keep(id))
+			.take(k)
+			.map(|(id, dist)| HnswHit {
+				id,
+				score: 1.0 - dist as f64,
+			})
+			.collect()
+	}
 }
 
 #[cfg(test)]
@@ -476,6 +521,59 @@ mod tests {
 		let hits = idx2.search(&[1.0, 0.0, 0.0], 5, 16);
 		assert_eq!(hits.len(), 1);
 		assert_eq!(hits[0].0, "solo");
+	}
+
+	#[test]
+	fn search_hits_returns_cosine_similarity_nearest_first() {
+		// search_hits must convert on-disk distance -> cosine similarity
+		// (1 - dist), so scores DESCEND (nearest first) and an indexed point
+		// scores ~1.0 against itself — the convention base::search fuses on.
+		let dir = tempfile::tempdir().unwrap();
+		let items = rand_items(200, 16, 1);
+		build_and_save(dir.path(), &items, Params::default()).unwrap();
+		let idx = DiskIndex::open(dir.path()).unwrap();
+
+		let hits = idx.search_hits(&items[0].1, 5, 64);
+		assert_eq!(hits.len(), 5);
+		assert_eq!(hits[0].id, "e0", "indexed point finds itself first");
+		assert!(hits[0].score > 0.99, "self-similarity ~1.0, got {}", hits[0].score);
+		// Scores are non-increasing (distances were non-decreasing).
+		for w in hits.windows(2) {
+			assert!(w[0].score >= w[1].score, "scores must descend: {:?}", hits);
+		}
+	}
+
+	#[test]
+	fn search_hits_filtered_returns_only_matching_and_is_a_subset() {
+		let dir = tempfile::tempdir().unwrap();
+		let items = rand_items(300, 16, 5);
+		build_and_save(dir.path(), &items, Params::default()).unwrap();
+		let idx = DiskIndex::open(dir.path()).unwrap();
+
+		// Keep only even-numbered ids ("e0","e2",...). Widen search_l so the
+		// sparse filter still yields a full k.
+		let even = |id: &str| {
+			id.trim_start_matches('e')
+				.parse::<usize>()
+				.map(|n| n % 2 == 0)
+				.unwrap_or(false)
+		};
+		let q = &items[0].1;
+		let filt = idx.search_hits_filtered(q, 10, 128, &even);
+		assert!(!filt.is_empty(), "filtered search finds matches");
+		assert!(filt.iter().all(|h| even(&h.id)), "every id passes the predicate");
+
+		// Filtered ids are a subset of a wide unfiltered candidate set.
+		let wide: HashSet<String> =
+			idx.search_hits(q, 128, 128).into_iter().map(|h| h.id).collect();
+		assert!(
+			filt.iter().all(|h| wide.contains(&h.id)),
+			"filtered hits are drawn from the unfiltered candidate pool"
+		);
+
+		// Reject-all -> empty; k==0 -> empty.
+		assert!(idx.search_hits_filtered(q, 10, 64, &|_| false).is_empty());
+		assert!(idx.search_hits_filtered(q, 0, 64, &even).is_empty());
 	}
 
 	#[test]
