@@ -800,4 +800,46 @@ mod tests {
 		let agreement = total / queries as f64;
 		assert!(agreement >= 0.75, "int8 vs f64 top-{k} agreement too low: {agreement:.3}");
 	}
+
+	#[test]
+	fn is_ambiguous_flags_short_results_and_tight_spreads() {
+		let c = |dist: f64| Candidate { id: "x".into(), dist };
+		// Fewer than k candidates -> ambiguous (must widen to look harder).
+		assert!(is_ambiguous(&[c(0.1)], 3, 0.05), "short result set is ambiguous");
+		// Top-k spread below epsilon -> ambiguous (results too close to trust).
+		assert!(is_ambiguous(&[c(0.10), c(0.11), c(0.12)], 3, 0.05), "tight spread is ambiguous");
+		// Spread at/above epsilon -> NOT ambiguous (clear winners, stop widening).
+		assert!(!is_ambiguous(&[c(0.10), c(0.30), c(0.50)], 3, 0.05), "wide spread is decisive");
+	}
+
+	#[test]
+	fn search_adaptive_finds_the_true_nearest_by_widening_from_a_small_ef() {
+		let mut idx = HnswIndex::new(8, 64);
+		// 20 near-identical decoys around the query plus one exact match: a small
+		// ef_start gives an ambiguous top-k, so search_adaptive must widen to recover
+		// the exact match (the recall guarantee that justifies the adaptive search).
+		for i in 0..20 {
+			idx.insert(format!("c{i}"), vec![1.0, 0.02 * (i as f64 + 1.0), 0.0]);
+		}
+		idx.insert("exact".into(), vec![1.0, 0.0, 0.0]);
+
+		let cfg = AdaptiveEfConfig { ef_start: 2, ef_max: 64, ef_step: 8, spread_epsilon: 0.05 };
+		let hits = idx.search_adaptive(&[1.0, 0.0, 0.0], 3, cfg);
+		assert_eq!(hits.len(), 3, "returns k results");
+		assert!(hits.iter().any(|h| h.id == "exact"), "widening recovers the exact match: {hits:?}");
+		assert!(
+			hits.windows(2).all(|w| w[0].score >= w[1].score),
+			"hits are ranked by score descending"
+		);
+	}
+
+	#[test]
+	fn search_adaptive_handles_empty_index_zero_k_and_empty_query() {
+		let cfg = AdaptiveEfConfig::default();
+		assert!(HnswIndex::new(8, 64).search_adaptive(&[1.0, 0.0], 5, cfg).is_empty(), "empty index");
+		let mut idx = HnswIndex::new(8, 64);
+		idx.insert("x".into(), vec![1.0, 0.0]);
+		assert!(idx.search_adaptive(&[1.0, 0.0], 0, cfg).is_empty(), "k=0");
+		assert!(idx.search_adaptive(&[], 5, cfg).is_empty(), "empty query");
+	}
 }
