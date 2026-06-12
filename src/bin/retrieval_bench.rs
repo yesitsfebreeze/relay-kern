@@ -44,6 +44,10 @@ struct Args {
 	/// Reader threads for --throughput (default: detected parallelism).
 	#[arg(long)]
 	threads: Option<usize>,
+	/// Report the graph's vector-storage footprint (f64 vs int8) instead of
+	/// scoring recall/NDCG.
+	#[arg(long)]
+	memory: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -69,6 +73,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		println!(
 			"retrieval latency (ms):  mean={:.3}  p50={:.3}  p95={:.3}  p99={:.3}",
 			r.mean_ms, r.p50_ms, r.p95_ms, r.p99_ms
+		);
+		return Ok(());
+	}
+
+	if args.memory {
+		let m = kern::bench_support::memory::estimate_memory(&g);
+		println!("trace: {}   entities: {}   vectors: {}   dim: {}", t.name, m.entities, m.vectors, m.dim);
+		println!(
+			"vector storage:  f64={:.1} KiB   int8={:.1} KiB   ratio={:.1}x",
+			m.f64_vector_bytes as f64 / 1024.0,
+			m.int8_vector_bytes as f64 / 1024.0,
+			m.quant_ratio()
 		);
 		return Ok(());
 	}

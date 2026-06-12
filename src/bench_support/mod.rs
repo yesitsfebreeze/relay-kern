@@ -21,6 +21,7 @@ pub mod embed;
 pub mod latency;
 pub mod locomo;
 pub mod locomo_run;
+pub mod memory;
 pub mod ndcg;
 pub mod replay;
 pub mod sweep;
