@@ -1,3 +1,6 @@
+//! CLI command handlers for the `kern` binary: each subcommand (admin, graph
+//! ops, ingest, MCP, profile, reembed, …) dispatched from `main`.
+
 mod admin;
 mod graph_ops;
 mod ingest_cmd;

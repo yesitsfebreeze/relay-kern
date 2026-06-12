@@ -1,3 +1,7 @@
+//! Interactive REPL for direct kern exploration: read a line, run it against the
+//! live graph, print the result — a thin developer/debug surface over the same
+//! retrieval the daemon serves.
+
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, RwLock};
 

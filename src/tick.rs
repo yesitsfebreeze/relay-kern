@@ -1,3 +1,7 @@
+//! Background tick scheduler — the autonomic loop behind self-organization:
+//! clusters thoughts, spawns/evicts child kerns, runs GNN propagation, decays
+//! heat (`pulse`), and drives stigmergy cold-GC (spill-before-drop).
+
 pub mod cluster;
 pub mod gnn_propagate;
 pub mod pulse;

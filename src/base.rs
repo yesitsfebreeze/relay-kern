@@ -1,3 +1,8 @@
+//! Foundational layer the rest of the daemon builds on: the in-memory knowledge
+//! graph, the LMDB store + cold tier, the HNSW / DiskANN vector and BM25 lexical
+//! indices, CRDT merge, heat decay, and the shared types / constants / math
+//! primitives.
+
 pub mod accept;
 pub mod constants;
 pub mod descriptors;

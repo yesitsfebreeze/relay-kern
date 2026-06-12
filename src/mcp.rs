@@ -1,3 +1,7 @@
+//! MCP server surface: the tool / prompt / resource handlers that expose kern
+//! over MCP (stdio + SSE/HTTP), built on the shared `tools::dispatch` core so the
+//! tool set has a single source of truth.
+
 pub mod prompt;
 pub mod resources;
 pub mod sse;
