@@ -1,3 +1,8 @@
+//! Daemon runtime state: the shared, lock-guarded container holding the live
+//! knowledge graph, the ingest worker, and the LLM clients that the MCP and RPC
+//! handlers operate on. Distinct from `base::store`, which is the LMDB
+//! persistence layer + cold tier.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};

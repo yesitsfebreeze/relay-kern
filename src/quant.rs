@@ -1,3 +1,8 @@
+//! Int8 / scalar quantisation of embedding **vectors**: store each f64 dimension
+//! as one signed byte (≈8× smaller) for the on-disk and in-memory search index,
+//! keeping the original f64 vector for rescoring. This is vector quantisation for
+//! the index — not LLM-model quantisation.
+
 use serde::{Deserialize, Serialize};
 
 pub const INT8_MAX_ABS: f32 = 127.0;

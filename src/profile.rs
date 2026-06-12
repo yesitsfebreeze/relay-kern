@@ -1,3 +1,7 @@
+//! Query-latency profiler (`kern profile`): a sequence of labelled
+//! [`Checkpoint`]s that splits a recall into graph-engine vs LLM
+//! (HyDE / answer / distill) stages, so the latency villain is visible.
+
 use std::time::Instant;
 
 #[derive(Debug, Clone)]

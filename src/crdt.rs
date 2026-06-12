@@ -1,3 +1,9 @@
+//! Grow-only (`GCounter`) and positive-negative (`PnCounter`) CRDT counters:
+//! conflict-free, commutative, idempotent, monotone primitives that converge to
+//! the same value across gossip-replicated nodes regardless of delivery order or
+//! duplication. They back the per-replica access and traversal counts merged by
+//! `base::merge`.
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
