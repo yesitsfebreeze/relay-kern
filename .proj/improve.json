@@ -1,0 +1,51 @@
+{
+  "target": "stubs — production-readiness sweep",
+  "indexed": true,
+  "mode": "stub-implementation",
+  "note": "Adapted /improve for the loop task: list all stubs, implement them, research docs/vision, ask when unclear. Most 'stub' textual matches are legitimate test infrastructure (stub_embed, deterministic bench embedders, distill test fixtures) or UI placeholders — excluded. Below are GENUINE production stubs / incomplete paths.",
+  "stubs": [
+    {
+      "id": "diskann-wiring",
+      "path": "src/base/diskann.rs",
+      "kind": "unwired-subsystem",
+      "severity": "high",
+      "effort": "large",
+      "status": "in-progress",
+      "verdict": "KEEP + WIRE. Decisive: src/config/graph.rs:23 reserves huge-corpus scaling as 'the DiskANN index's job'; src/base/constants.rs:69 ships NO entity-eviction cap, so the graph-global in-RAM HnswIndex (entity_idx/gnn_entity_idx/reason_idx, populated by rebuild_index for all loaded kerns) grows UNBOUNDED. User confirmed db grows unbounded in practice. DiskANN fixes the resident-RAM/load-time ceiling (vectors mmap'd on disk, not heap). Not on-disk byte count (that'd be PQ/GC).",
+      "plan": "docs/superpowers/plans/2026-06-12-diskann-wiring.md (TDD increments I0-I8)",
+      "next_action": "I1 DONE + I2 DONE (uncommitted). I2: GraphGnn::build_entity_disk_index(dir) in src/base/graph.rs snapshots resident entities (BTreeMap id-sorted/deduped, skip Superseded, f64->f32) via diskann::build_and_save; parity test disk_index_snapshot_mirrors_in_ram_membership_and_ranking GREEN; full base:: suite 146/146 pass. NEXT = I3: introduce VectorBackend enum (Resident(HnswIndex) | Disk{snapshot,delta,tombstones}) and route src/base/search.rs through it with NO behavior change (always Resident). Keep entire existing search suite green. Then I4 delta+tombstones, I5 rebuild_index threshold + [graph] disk_threshold config.",
+      "doc_reconciled": "docs/kern/diskann-disk-index.md Status updated to reflect LMDB reality + KEEP/WIRE decision. TODO: correct kern memory 'retrieval-stack-state' (claimed wired) once kern MCP reconnects — it was DOWN this turn.",
+      "evidence": "Module header: 'self-contained and tested, but not yet wired into the live search path'. Live path is src/base/search.rs (search_all_unlocked/_filtered over GraphGnn in-memory HnswIndex). diskann.rs = read-only mmap Vamana over full f32 vectors (NO PQ yet). Design doc docs/kern/diskann-disk-index.md is STALE: its Phase-1 target (replace cold.rs O(n) JSONL scan) is obsolete — cold.rs/persist.rs were replaced by LMDB store.rs (int8-on-disk); cold_search (store.rs:432) is now an explicitly BOUNDED scan (capped by COLD_MAX_ENTRIES), so the linear-scan motivation was deliberately neutralized. Phase-2 (disk-backed hot index for large kerns) is the real value but high-risk and wants PQ-in-RAM that current diskann.rs lacks.",
+      "note": "PREMISE PARTLY STALE. The LMDB refactor (int8-on-disk) already attacked the RAM ceiling the doc worried about, and the cold cap removed Phase-1's reason to exist. Wiring this 490-line subsystem into the hot path on a stale premise is questionable. Re-asked user with grounded fork: (A) Phase-2 hot wiring (+PQ, large multi-session), (B) reconcile docs/memory + defer DiskANN as a ready building-block, move loop to next real stub, (C) smallest self-contained slice = optional DiskIndex accelerator for cold_search. NEEDS USER DECISION."
+    },
+    {
+      "id": "async-ingest-placeholder-id",
+      "path": "src/trnsprt/src/kern_rpc/dto.rs:166",
+      "kind": "placeholder-return",
+      "severity": "medium",
+      "effort": "small-medium",
+      "status": "resolved-false-positive",
+      "evidence": "Traced end-to-end: tools_mutate.rs:224 async path returns worker.enqueue(...) = util::content_hash(text) (worker.rs:50). Worker commits the entity under the SAME content hash (worker.rs:122). Test enqueue_returns_the_content_hash_doc_id pins this invariant. The id is stable and resolvable on a later read — NOT a throwaway placeholder.",
+      "resolution": "No logic stub. Only defect was the misleading word 'placeholder' in dto.rs doc comments (IngestReq.sync, IngestRes.entity_id). Reworded both to state it is the stable content-hash doc id the worker commits under. Doc-only change."
+    },
+    {
+      "id": "session-mirror-close-noop",
+      "path": "src/ingest/session_mirror.rs:250",
+      "kind": "deliberate-noop",
+      "severity": "low",
+      "effort": "n/a",
+      "status": "wontfix-candidate",
+      "evidence": "'Closing does not remove the document; sessions stay searchable post-close. No-op for now.'",
+      "note": "Reads as intentional design, not an unfinished stub. Likely no action."
+    }
+  ],
+  "excluded_as_test_or_design": [
+    "benches/bench.rs stub_embed", "test_utils/src/kern.rs stub_embed/stub_llm_client",
+    "src/bench_support/* deterministic stub embedder", "src/ingest/distill.rs stub() test fixtures",
+    "src/ingest/file_watcher.rs + session_mirror.rs stub_vector (test helpers)",
+    "src/commands/{reembed,profile_cmd}.rs stub /api/embed test servers",
+    "src/base/store.rs SHARED-CANDIDATE (explicit design decision)",
+    "src/trnsprt/src/typed/error.rs legacy McpError coexistence (Phase 2 plan)",
+    "src/mux/research.rs UI placeholders"
+  ]
+}

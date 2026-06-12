@@ -163,7 +163,8 @@ pub struct IngestReq {
     #[serde(default)]
     pub conf: f64,
     /// If true, block until ingest completes; otherwise queue and
-    /// return immediately with a placeholder doc id.
+    /// return immediately with the content-hash doc id the worker will
+    /// commit the entity under — stable and resolvable on a later read.
     #[serde(default)]
     pub sync: bool,
 }
@@ -183,8 +184,9 @@ impl Default for IngestReq {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct IngestRes {
-    /// Newly created entity id (or doc id when `sync=false` and the
-    /// pipeline hasn't yet committed the entity).
+    /// Newly created entity id. When `sync=false` this is the
+    /// content-hash doc id the worker will commit the entity under,
+    /// returned before the pipeline has committed it.
     pub entity_id: String,
     /// One of `"queued" | "ingested" | "duplicate" | "rejected"` —
     /// matches kern's `ingest::outcome::Status::as_str`.
