@@ -184,6 +184,7 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
 
     let mut snapshots: HashMap<String, ScreenSnapshot> = HashMap::new();
     let mut research: Option<crate::mux::ResearchPanel> = None;
+    let mut research_visible: bool = false;
 
     loop {
         // Drain + reap: brief lock acquisition.
@@ -196,14 +197,16 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
             }
         }
 
-        // Draw: research panel takes over when open; otherwise normal pane draw.
-        if let Some(ref mut panel) = research {
-            panel.tick();
-            {
-                let reg = registry.lock().unwrap_or_else(|p| p.into_inner());
-                draw_status_bar(&reg, &mut stdout, cols, &cwd)?;
+        // Draw: research panel takes over when visible; otherwise normal pane draw.
+        if research_visible {
+            if let Some(ref mut panel) = research {
+                panel.tick();
+                {
+                    let reg = registry.lock().unwrap_or_else(|p| p.into_inner());
+                    draw_status_bar(&reg, &mut stdout, cols, &cwd)?;
+                }
+                panel.draw(&mut stdout, cols, rows)?;
             }
-            panel.draw(&mut stdout, cols, rows)?;
         } else {
             let reg = registry.lock().unwrap_or_else(|p| p.into_inner());
             draw_frame(&reg, &mut stdout, cols, rows, &cwd, &mut snapshots)?;
@@ -216,7 +219,7 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
                 Event::Resize(w, h) => {
                     cols = w;
                     rows = h;
-                    if research.is_none() {
+                    if !research_visible {
                         let mut reg = registry.lock().unwrap_or_else(|p| p.into_inner());
                         reg.resize_all(cols, rows.saturating_sub(1));
                     }
@@ -227,24 +230,35 @@ pub fn run_tui(registry: &SharedRegistry, keymap: &KeyMap) -> io::Result<()> {
                     if keymap.matches_quit(&kev) {
                         break;
                     } else if keymap.matches_research(&kev) {
-                        // Toggle the research panel (no registry lock needed).
-                        match research.take() {
-                            Some(_) => {}
+                        // Toggle visibility. Construct once on first open; NEVER drop —
+                        // history + journal tailer persist while hidden.
+                        match research {
                             None => {
                                 let mut panel = crate::mux::ResearchPanel::new();
                                 panel.session.on_panel_open();
                                 research = Some(panel);
+                                research_visible = true;
+                            }
+                            Some(ref mut panel) => {
+                                research_visible = !research_visible;
+                                if research_visible {
+                                    // Re-entering: WelcomeBack if history exists, else Fresh.
+                                    panel.session.on_panel_open();
+                                }
                             }
                         }
                         queue!(stdout, Clear(ClearType::All))?;
                         snapshots.clear();
-                    } else if let Some(ref mut panel) = research {
-                        // Delegate all key events to the research panel.
-                        let close = panel.handle_key(&kev);
-                        if close {
-                            research = None;
-                            queue!(stdout, Clear(ClearType::All))?;
-                            snapshots.clear();
+                    } else if research_visible {
+                        // Delegate keys to the panel while it is shown.
+                        if let Some(ref mut panel) = research {
+                            let close = panel.handle_key(&kev);
+                            if close {
+                                // Esc HIDES (panel + history preserved), never drops.
+                                research_visible = false;
+                                queue!(stdout, Clear(ClearType::All))?;
+                                snapshots.clear();
+                            }
                         }
                     } else {
                         // Normal pane key routing.

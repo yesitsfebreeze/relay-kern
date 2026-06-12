@@ -256,6 +256,12 @@ pub struct ResearchPanel {
     pub session: ChatSession,
 }
 
+impl Default for ResearchPanel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResearchPanel {
     /// Construct a new panel. Spawns the journal tailer thread immediately.
     pub fn new() -> Self {
@@ -335,9 +341,10 @@ impl ResearchPanel {
 
         // ── Chat pane (left) ──────────────────────────────────────────────
         let chat_width  = left_cols as usize;
-        let input_row   = row_offset + pane_rows - 1;
-        let divider_row = input_row - 1;
-        let history_rows = pane_rows.saturating_sub(2) as usize;
+        let warn_row    = row_offset + pane_rows - 1;
+        let input_row   = warn_row.saturating_sub(1);
+        let divider_row = input_row.saturating_sub(1);
+        let history_rows = pane_rows.saturating_sub(3) as usize;
 
         // Build all rendered lines from history.
         let mut all_lines: Vec<(bool, String)> = Vec::new(); // (is_user, line)
@@ -352,7 +359,7 @@ impl ResearchPanel {
                 let pad = chat_width.saturating_sub(full.chars().count());
                 all_lines.push((true, format!("{}{full}", " ".repeat(pad))));
             } else {
-                for chunk in wrap_text(&entry.text, chat_width) {
+                for chunk in wrap_text_preserving(&entry.text, chat_width) {
                     all_lines.push((false, chunk));
                 }
             }
@@ -397,7 +404,7 @@ impl ResearchPanel {
         // Input line.
         match self.session.state {
             SessionState::WelcomeBack => {
-                let placeholder = "Type or press enter to reset";
+                let placeholder = "type to continue, enter to reset";
                 let padding = chat_width.saturating_sub(placeholder.len());
                 queue!(stdout,
                     MoveTo(0, input_row),
@@ -438,6 +445,20 @@ impl ResearchPanel {
             }
         }
 
+        // Persistent dim warning: every query sends the whole buffer.
+        {
+            let warn = "whole conversation is sent to kern for accuracy";
+            let shown: String = warn.chars().take(chat_width).collect();
+            let pad = chat_width.saturating_sub(shown.chars().count());
+            queue!(stdout,
+                MoveTo(0, warn_row),
+                SetForegroundColor(Color::DarkGrey),
+                Print(&shown),
+                Print(" ".repeat(pad)),
+                ResetColor
+            )?;
+        }
+
         Ok(())
     }
 
@@ -450,12 +471,15 @@ impl ResearchPanel {
         match self.session.state {
             SessionState::WelcomeBack => match kev.code {
                 KeyCode::Esc => return true,
-                KeyCode::Enter | KeyCode::Backspace => self.session.handle_reset(),
+                // Enter on the (empty) placeholder is the ONLY clear-memory gesture.
+                KeyCode::Enter => self.session.handle_reset(),
+                // Any editing gesture CONTINUES the conversation: keep history, start typing.
+                KeyCode::Backspace => self.session.state = SessionState::Typing,
                 KeyCode::Char(c)
                     if kev.modifiers == KeyModifiers::NONE
                     || kev.modifiers == KeyModifiers::SHIFT =>
                 {
-                    self.session.handle_reset();
+                    // push_char appends and flips state to Typing; history untouched.
                     self.session.push_char(c);
                 }
                 _ => {}
@@ -474,11 +498,13 @@ impl ResearchPanel {
                 KeyCode::Esc => return true,
                 KeyCode::Enter => {
                     if !self.session.input.is_empty() {
-                        let query = std::mem::take(&mut self.session.input);
+                        let text = std::mem::take(&mut self.session.input);
                         self.session.history.push(ChatEntry {
                             role: ChatRole::User,
-                            text: query.clone(),
+                            text,
                         });
+                        // Multi-turn: send the WHOLE conversation buffer to kern.
+                        let query = build_kern_query(&self.session.history);
                         let (tx, rx) = mpsc::sync_channel(1);
                         // Capture the runtime handle from the spawn_blocking context
                         // so the answer thread (a plain OS thread with no async context)
@@ -518,6 +544,27 @@ impl ResearchPanel {
 
 // ── Kern answer (internal RPC) ────────────────────────────────────────────────
 
+/// Serialize the full chat buffer into one kern query string.
+///
+/// The WHOLE conversation is sent for answer accuracy (the UI warns the user of
+/// this). The current question is the last `User` entry already pushed onto
+/// `history`; the trailing instruction anchors kern to it.
+fn build_kern_query(history: &[ChatEntry]) -> String {
+    let mut s = String::new();
+    for e in history {
+        let who = match e.role {
+            ChatRole::User      => "User",
+            ChatRole::Assistant => "Assistant",
+        };
+        s.push_str(who);
+        s.push_str(": ");
+        s.push_str(&e.text);
+        s.push_str("\n\n");
+    }
+    s.push_str("Answer the most recent User question above, using the prior turns as context.");
+    s
+}
+
 /// Call the kern daemon's `query` tool (with `answer: true`) via the internal
 /// typed RPC channel, bypassing the MCP JSON-over-TCP layer entirely.
 async fn kern_answer(query: String) -> anyhow::Result<String> {
@@ -539,7 +586,8 @@ async fn kern_answer(query: String) -> anyhow::Result<String> {
     if env.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
         anyhow::bail!("kern: {}", extract_rpc_text(env));
     }
-    Ok(extract_rpc_text(env))
+    let raw = extract_rpc_text(env);
+    answer_from_envelope_text(&raw)
 }
 
 /// Concatenate all `type: text` items from an MCP content envelope.
@@ -562,8 +610,60 @@ fn extract_rpc_text(envelope: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
-/// Wrap `text` into lines of at most `width` chars (naive word-wrap).
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
+/// Pull kern's synthesized prose answer out of the `query` tool's JSON text.
+///
+/// kern returns `{"entities":[…],"answer":"<prose>"}`. We surface the `answer`
+/// field; if it is empty/absent we degrade to a terse entity summary. We never
+/// return the raw JSON object (that is the "JSON list" bug this fixes).
+fn answer_from_envelope_text(raw: &str) -> anyhow::Result<String> {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => {
+            if let Some(ans) = v.get("answer").and_then(|a| a.as_str()) {
+                if !ans.trim().is_empty() {
+                    return Ok(ans.to_string());
+                }
+            }
+            let summary = v
+                .get("entities")
+                .and_then(|e| e.as_array())
+                .map(|arr| summarize_entities(arr))
+                .unwrap_or_default();
+            if summary.trim().is_empty() {
+                anyhow::bail!("kern returned no answer");
+            }
+            Ok(summary)
+        }
+        // Not JSON (shouldn't happen) — return raw so output is never silently dropped.
+        Err(_) => Ok(raw.to_string()),
+    }
+}
+
+/// One-line, human-readable summary of entity `text` (falling back to `id`).
+/// Graceful degrade when `answer:true` produced retrieval but no synthesis.
+fn summarize_entities(arr: &[serde_json::Value]) -> String {
+    let names: Vec<String> = arr
+        .iter()
+        .take(5)
+        .filter_map(|e| {
+            e.get("text")
+                .and_then(|t| t.as_str())
+                .or_else(|| e.get("id").and_then(|i| i.as_str()))
+                .map(|s| {
+                    let t: String = s.chars().take(60).collect();
+                    t.trim().to_string()
+                })
+                .filter(|s| !s.is_empty())
+        })
+        .collect();
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!("Related: {}", names.join("; "))
+    }
+}
+
+/// Wrap one logical line into rows of at most `width` chars (greedy word-wrap).
+fn wrap_one_line(text: &str, width: usize) -> Vec<String> {
     if width == 0 { return vec![text.to_string()]; }
     let mut lines   = Vec::new();
     let mut current = String::new();
@@ -581,6 +681,28 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if !current.is_empty() { lines.push(current); }
     if lines.is_empty()    { lines.push(String::new()); }
     lines
+}
+
+/// Word-wrap `text` to `width`, preserving the source line structure: each
+/// '\n'-delimited line wraps independently and blank lines are kept as blank
+/// rows. Multi-paragraph / bulleted kern answers then render readably instead
+/// of collapsing into one run-on block.
+fn wrap_text_preserving(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    for src_line in text.split('\n') {
+        if src_line.trim().is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        out.extend(wrap_one_line(src_line, width));
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -724,26 +846,115 @@ mod tests {
 
     #[test]
     fn wrap_text_single_line() {
-        let lines = wrap_text("hello world", 20);
+        let lines = wrap_one_line("hello world", 20);
         assert_eq!(lines, vec!["hello world"]);
     }
 
     #[test]
     fn wrap_text_wraps_at_width() {
-        let lines = wrap_text("hello world foo bar", 11);
+        let lines = wrap_one_line("hello world foo bar", 11);
         assert_eq!(lines[0], "hello world");
         assert_eq!(lines[1], "foo bar");
     }
 
     #[test]
     fn wrap_text_empty_string() {
-        let lines = wrap_text("", 20);
+        let lines = wrap_one_line("", 20);
         assert_eq!(lines, vec![""]);
     }
 
     #[test]
     fn wrap_text_zero_width_returns_original() {
-        let lines = wrap_text("hello", 0);
+        let lines = wrap_one_line("hello", 0);
         assert_eq!(lines, vec!["hello"]);
+    }
+
+    // ── WelcomeBack: typing continues, Enter resets ──────────────────────────
+
+    #[test]
+    fn welcome_back_typing_continues() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut panel = ResearchPanel::new();
+        panel.session.history.push(ChatEntry { role: ChatRole::User, text: "old".into() });
+        panel.session.state = SessionState::WelcomeBack;
+        let close = panel.handle_key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(!close, "typing must not close the panel");
+        assert_eq!(panel.session.history.len(), 1, "history preserved on typing (continue, not reset)");
+        assert_eq!(panel.session.input, "h");
+        assert!(matches!(panel.session.state, SessionState::Typing));
+    }
+
+    #[test]
+    fn welcome_back_enter_resets() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut panel = ResearchPanel::new();
+        panel.session.history.push(ChatEntry { role: ChatRole::User, text: "old".into() });
+        panel.session.state = SessionState::WelcomeBack;
+        let close = panel.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!close, "reset must not close the panel");
+        assert!(panel.session.history.is_empty(), "Enter on the placeholder clears memory");
+        assert!(matches!(panel.session.state, SessionState::Fresh));
+    }
+
+    #[test]
+    fn welcome_back_backspace_continues_keeps_history() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut panel = ResearchPanel::new();
+        panel.session.history.push(ChatEntry { role: ChatRole::User, text: "old".into() });
+        panel.session.state = SessionState::WelcomeBack;
+        panel.handle_key(&KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(panel.session.history.len(), 1, "backspace continues, does not reset");
+        assert!(matches!(panel.session.state, SessionState::Typing));
+    }
+
+    // ── Whole-buffer multi-turn query ────────────────────────────────────────
+
+    #[test]
+    fn build_kern_query_includes_all_turns() {
+        let hist = vec![
+            ChatEntry { role: ChatRole::User,      text: "first q".into() },
+            ChatEntry { role: ChatRole::Assistant, text: "first a".into() },
+            ChatEntry { role: ChatRole::User,      text: "second q".into() },
+        ];
+        let q = build_kern_query(&hist);
+        assert!(q.contains("first q"),  "includes earliest user turn: {q}");
+        assert!(q.contains("first a"),  "includes prior assistant turn: {q}");
+        assert!(q.contains("second q"), "includes latest user turn: {q}");
+        assert!(q.contains("most recent"), "anchors kern to the latest question: {q}");
+    }
+
+    // ── Answer extraction (no JSON dump) ─────────────────────────────────────
+
+    #[test]
+    fn answer_from_envelope_extracts_answer_field() {
+        let raw = r#"{"entities":[{"id":"a","text":"x"}],"answer":"hello there"}"#;
+        assert_eq!(answer_from_envelope_text(raw).unwrap(), "hello there");
+    }
+
+    #[test]
+    fn answer_from_envelope_falls_back_without_answer() {
+        let raw = r#"{"entities":[{"id":"kern.goal","text":"become smarter"},{"id":"kern.viewer","text":"viewer design"}]}"#;
+        let out = answer_from_envelope_text(raw).unwrap();
+        assert!(out.contains("become smarter"), "summary uses entity text: {out}");
+        assert!(!out.contains('{'), "never a raw JSON dump: {out}");
+    }
+
+    #[test]
+    fn answer_from_envelope_empty_answer_uses_fallback() {
+        let raw = r#"{"entities":[{"id":"e1","text":"alpha"}],"answer":"   "}"#;
+        let out = answer_from_envelope_text(raw).unwrap();
+        assert!(out.contains("alpha"), "blank answer falls back to entities: {out}");
+    }
+
+    // ── Line-preserving wrap ─────────────────────────────────────────────────
+
+    #[test]
+    fn wrap_text_preserving_keeps_paragraph_breaks() {
+        let text = "Para one is short.\n\n- bullet a\n- bullet b";
+        let lines = wrap_text_preserving(text, 40);
+        assert!(lines.iter().any(|l| l.contains("Para one")), "first paragraph present");
+        assert!(lines.iter().any(|l| l.is_empty()), "blank line between paragraphs preserved");
+        assert!(lines.iter().any(|l| l.contains("- bullet a")), "bullet a on its own line");
+        assert!(lines.iter().any(|l| l.contains("- bullet b")), "bullet b on its own line");
     }
 }
