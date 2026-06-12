@@ -10,6 +10,56 @@ use crate::mux::pty::{new_session_id, PtySession};
 
 pub type SharedRegistry = Arc<Mutex<PaneRegistry>>;
 
+/// One in-flight human question raised by an agent via `raise_question`.
+pub struct PendingQuestion {
+    pub id:       String,
+    pub label:    String,
+    pub question: String,
+    answer_tx:    std::sync::mpsc::Sender<String>,
+}
+
+/// In-memory roster of questions awaiting a human answer. Lives inside
+/// [`PaneRegistry`]; the `raise_question` tool handler registers + blocks on
+/// the receiver, the Ctrl+K overlay lists + answers. Never persisted.
+#[derive(Default)]
+pub struct QuestionRegistry {
+    pending: Vec<PendingQuestion>,
+}
+
+impl QuestionRegistry {
+    /// Register a question and return `(id, receiver)`. The caller blocks on
+    /// the receiver AFTER releasing the registry lock.
+    pub fn open(&mut self, label: String, question: String) -> (String, std::sync::mpsc::Receiver<String>) {
+        let id = new_session_id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.pending.push(PendingQuestion { id: id.clone(), label, question, answer_tx: tx });
+        (id, rx)
+    }
+
+    /// Roster view: `(id, label, question)` per pending entry, insertion order.
+    pub fn list(&self) -> Vec<(String, String, String)> {
+        self.pending.iter().map(|p| (p.id.clone(), p.label.clone(), p.question.clone())).collect()
+    }
+
+    /// Deliver `answer` to question `id`; remove it. False if `id` is unknown.
+    pub fn answer(&mut self, id: &str, answer: String) -> bool {
+        let Some(pos) = self.pending.iter().position(|p| p.id == id) else { return false };
+        let p = self.pending.remove(pos);
+        let _ = p.answer_tx.send(answer); // recv side may have hung up; ignore.
+        true
+    }
+
+    /// Drop question `id` without answering (its sender drops → caller's recv errors).
+    pub fn dismiss(&mut self, id: &str) -> bool {
+        let Some(pos) = self.pending.iter().position(|p| p.id == id) else { return false };
+        self.pending.remove(pos);
+        true
+    }
+
+    pub fn len(&self) -> usize { self.pending.len() }
+    pub fn is_empty(&self) -> bool { self.pending.is_empty() }
+}
+
 pub struct PaneRegistry {
     pub panes: Vec<PtySession>,
     /// Index of the currently focused pane. 0 = main.
@@ -19,6 +69,8 @@ pub struct PaneRegistry {
     pub rows: u16,
     pub thoughts: u32,
     pub reasons:  u32,
+    /// Questions raised by agents that are blocked awaiting a human answer.
+    pub questions: QuestionRegistry,
 }
 
 impl PaneRegistry {
@@ -34,7 +86,7 @@ impl PaneRegistry {
             "mux",
             serde_json::json!({ "fork_id": id }),
         ));
-        Ok(Self { panes: vec![pane], focus: 0, cols, rows, thoughts: 0, reasons: 0 })
+        Ok(Self { panes: vec![pane], focus: 0, cols, rows, thoughts: 0, reasons: 0, questions: QuestionRegistry::default() })
     }
 
     /// Spawn a new sub-pane and return its session id.
@@ -194,5 +246,42 @@ mod tests {
         let id = reg.spawn_pane("sub-1".to_string(), cmd.to_string(), 80, 24).unwrap();
         assert!(reg.find(&id).is_some());
         assert!(reg.find("nonexistent").is_none());
+    }
+
+    // ── QuestionRegistry ──────────────────────────────────────────────────
+
+    #[test]
+    fn question_open_then_answer_delivers_text() {
+        let mut q = QuestionRegistry::default();
+        let (id, rx) = q.open("worker-1".into(), "ship it?".into());
+        assert_eq!(q.len(), 1);
+        assert!(q.answer(&id, "yes".into()), "answer should find the id");
+        assert_eq!(rx.recv().unwrap(), "yes", "blocked caller receives the answer");
+        assert_eq!(q.len(), 0, "answered question is removed");
+    }
+
+    #[test]
+    fn question_list_reports_label_and_text() {
+        let mut q = QuestionRegistry::default();
+        let _ = q.open("audit".into(), "delete shards?".into());
+        let roster = q.list();
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].1, "audit");
+        assert_eq!(roster[0].2, "delete shards?");
+    }
+
+    #[test]
+    fn question_dismiss_drops_sender_so_recv_errors() {
+        let mut q = QuestionRegistry::default();
+        let (id, rx) = q.open(String::new(), "x?".into());
+        assert!(q.dismiss(&id));
+        assert!(rx.recv().is_err(), "dismiss drops the sender; recv errors");
+        assert_eq!(q.len(), 0);
+    }
+
+    #[test]
+    fn question_answer_unknown_id_returns_false() {
+        let mut q = QuestionRegistry::default();
+        assert!(!q.answer("nope", "x".into()));
     }
 }
