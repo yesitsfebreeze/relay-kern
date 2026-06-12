@@ -122,6 +122,7 @@ impl trnsprt::McpServer for Server {
 			"send"       => self.tool_send(args),
 			"panes"      => self.tool_panes(args),
 			"status"     => self.tool_status(args),
+			"raise_question" => self.tool_raise_question(args),
 			_ => return Ok(trnsprt::ToolResult {
 				content: vec![serde_json::json!({"type": "text", "text": format!("unknown tool: {name}")})],
 				is_error: true,

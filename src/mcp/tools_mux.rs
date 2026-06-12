@@ -82,6 +82,18 @@ pub fn tool_schemas() -> Vec<serde_json::Value> {
                 },
             },
         }),
+        json!({
+            "name": "raise_question",
+            "description": "Ask the human operator a question and BLOCK until they answer in the mux. Returns their answer as the tool result. Use when you need a human decision to proceed.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["question"],
+                "properties": {
+                    "question": { "type": "string", "description": "The decision or answer you need from the human." },
+                    "label":    { "type": "string", "description": "Optional: who is asking (e.g. 'worker-3'), shown in the operator's roster." },
+                },
+            },
+        }),
     ]
 }
 
@@ -101,6 +113,9 @@ struct DelegateArgs { label: String, task: String, cmd: Option<String> }
 
 #[derive(Deserialize)]
 struct CollectArgs { session_id: String }
+
+#[derive(Deserialize)]
+struct RaiseQuestionArgs { question: String, #[serde(default)] label: String }
 
 // ── Handlers (Server methods) ───────────────────────────────────────────────
 
@@ -266,6 +281,32 @@ impl Server {
             "result":     result_text,
         }))
     }
+
+    /// `raise_question` — register a question and BLOCK until the human answers
+    /// via the Ctrl+K overlay. The kern_rpc wire path enforces no read timeout,
+    /// so the block is indefinite; the parked worker thread is freed the moment
+    /// the answer lands. The registry lock is released BEFORE the blocking
+    /// `recv()` so the TUI can deliver the answer (no deadlock).
+    pub(crate) fn tool_raise_question(&self, args: &serde_json::Value) -> serde_json::Value {
+        let Some(reg) = self.mux.as_ref() else { return tool_error("not running under a mux") };
+        let p: RaiseQuestionArgs = match serde_json::from_value(args.clone()) {
+            Ok(v) => v,
+            Err(e) => return tool_error(&format!("invalid args: {e}")),
+        };
+        // Lock ONLY to register; drop the guard before blocking on recv.
+        let rx = {
+            let mut r = match reg.lock() {
+                Ok(g) => g,
+                Err(_) => return tool_error("registry lock poisoned"),
+            };
+            let (_id, rx) = r.questions.open(p.label, p.question);
+            rx
+        };
+        match rx.recv() {
+            Ok(answer) => tool_result_json(&json!({ "answer": answer })),
+            Err(_)     => tool_error("question dismissed without an answer"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -276,7 +317,7 @@ mod tests {
     fn schema_names_are_kern_native() {
         let defs = tool_schemas();
         let names: Vec<&str> = defs.iter().map(|d| d["name"].as_str().expect("name")).collect();
-        assert_eq!(names, ["delegate", "collect", "spawn", "send", "panes", "status"]);
+        assert_eq!(names, ["delegate", "collect", "spawn", "send", "panes", "status", "raise_question"]);
         // No legacy mux_ prefix survives.
         assert!(names.iter().all(|n| !n.starts_with("mux_")), "no mux_ prefix: {names:?}");
     }
@@ -299,6 +340,15 @@ mod tests {
                 .iter().filter_map(|v| v.as_str()).collect();
             assert!(req.contains(&"session_id"), "{name} must require session_id, got {req:?}");
         }
+    }
+
+    #[test]
+    fn raise_question_schema_present_and_requires_question() {
+        let defs = tool_schemas();
+        let d = defs.iter().find(|d| d["name"] == "raise_question").expect("raise_question present");
+        let req: Vec<&str> = d["inputSchema"]["required"].as_array().unwrap()
+            .iter().filter_map(|v| v.as_str()).collect();
+        assert!(req.contains(&"question"), "must require question, got {req:?}");
     }
 
     #[test]
