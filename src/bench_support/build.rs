@@ -26,6 +26,11 @@ pub fn build_graph(trace: &Trace) -> GraphGnn {
 fn insert_docs(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 	for doc in &trace.docs {
 		let vec = embed::embed(&doc.text);
+		let kind = doc
+			.kind
+			.as_deref()
+			.and_then(EntityKind::parse)
+			.unwrap_or(EntityKind::Claim);
 		let t = Entity {
 			id: doc.id.clone(),
 			statements: vec![doc.text.clone()],
@@ -36,7 +41,7 @@ fn insert_docs(g: &mut GraphGnn, root_id: &str, trace: &Trace) {
 			}],
 			vector: vec,
 			score: 0.5,
-			kind: EntityKind::Claim,
+			kind,
 			..Default::default()
 		};
 		if let Some(kern) = g.kerns.get_mut(root_id) {

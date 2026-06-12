@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 pub struct TraceDoc {
 	pub id: String,
 	pub text: String,
+	/// Optional entity kind (`"fact"` | `"claim"` | …, parsed by
+	/// [`EntityKind::parse`](crate::base::types::EntityKind::parse); defaults to
+	/// `Claim`). Lets a trace mix kinds so a `filter_kind` query can be scored
+	/// against a corpus where the relevant docs are a filtered minority.
+	#[serde(default)]
+	pub kind: Option<String>,
 }
 
 /// One query probe: the query text, the document ids that count as relevant

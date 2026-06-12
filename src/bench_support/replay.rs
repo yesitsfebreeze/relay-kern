@@ -84,7 +84,11 @@ mod tests {
 	use super::super::trace::{TraceDoc, TraceQuery};
 
 	fn doc(id: &str, text: &str) -> TraceDoc {
-		TraceDoc { id: id.into(), text: text.into() }
+		TraceDoc { id: id.into(), text: text.into(), kind: None }
+	}
+
+	fn doc_kind(id: &str, text: &str, kind: &str) -> TraceDoc {
+		TraceDoc { id: id.into(), text: text.into(), kind: Some(kind.into()) }
 	}
 
 	/// End-to-end: build a graph from a tiny trace, replay a query whose text
@@ -168,6 +172,45 @@ mod tests {
 			replay(&g, &cfg, &mk(Some("claim"))).mean_recall10,
 			1.0,
 			"kind=claim matches -> recall restored, so it was the filter, not the query"
+		);
+	}
+
+	#[test]
+	fn filtered_query_recovers_a_minority_kind_buried_by_the_majority() {
+		// 15 Claims + 2 Facts share identical text, so all are equally relevant by
+		// vector and lexical score. The expected docs are the 2 Facts. With ties
+		// broken by id ascending, every "c*" Claim sorts before the "fact*" docs,
+		// burying both Facts past the top-10 -> an UNFILTERED query scores
+		// recall@10 = 0. A kind=fact filter seeds only Facts (dense + importance +
+		// lexical all filter at source), so both are retrieved -> recall@10 = 1.0.
+		// End-to-end proof of the filtered-seed win on a fewer-than-k scenario.
+		let text = "rust ownership and the borrow checker semantics";
+		let mut docs: Vec<TraceDoc> = (0..15).map(|i| doc(&format!("c{i:02}"), text)).collect();
+		docs.push(doc_kind("fact0", text, "fact"));
+		docs.push(doc_kind("fact1", text, "fact"));
+
+		let mk = |filter: Option<&str>| Trace {
+			name: "buried-minority".into(),
+			docs: docs.clone(),
+			queries: vec![TraceQuery {
+				id: "q".into(),
+				query: text.into(),
+				expected_ids: vec!["fact0".into(), "fact1".into()],
+				mode: "hybrid".into(),
+				filter_kind: filter.map(str::to_string),
+			}],
+		};
+		let g = build_graph(&mk(None));
+		let cfg = RetrievalConfig::default();
+
+		let unfiltered = replay(&g, &cfg, &mk(None)).mean_recall10;
+		let filtered = replay(&g, &cfg, &mk(Some("fact"))).mean_recall10;
+
+		assert_eq!(filtered, 1.0, "kind=fact surfaces both buried Facts");
+		assert!(
+			filtered > unfiltered,
+			"filtering recovers recall the unfiltered query loses to the majority kind \
+			 (filtered {filtered} vs unfiltered {unfiltered})"
 		);
 	}
 
