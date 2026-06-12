@@ -6,6 +6,10 @@
 /.kern/*
 !/.kern/kern.toml
 
+# stray crate-local runtime journals from in-dir test runs (tests use tempdir;
+# this never belongs in the repo)
+/src/**/.kern/
+
 # relay daemon runtime state (capture, journal, graph, logs)
 /.relay/
 
