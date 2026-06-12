@@ -1,14 +1,33 @@
 # DiskANN-style disk-resident index — design
 
-**Status (updated 2026-06-12):** the standalone Vamana index IS implemented and
-tested (`src/base/diskann.rs`: `build_and_save` + mmap `DiskIndex::open`/`search`,
-recall@10 ≥ 0.90 vs brute force), but **not yet wired into the live search path**
-(`src/base/search.rs`). Decision: KEEP and WIRE — it is the architecture's
-designated answer to the unbounded resident-set ceiling (see
+**Status (updated 2026-06-12): WIRED (opt-in, entity index only).** DiskANN now
+serves the live entity vector search above a configurable threshold — it is the
+architecture's designated answer to the unbounded resident-set ceiling (see
 `src/config/graph.rs`: huge-corpus scaling is "the DiskANN index's job, not this
 cap"; `src/base/constants.rs`: no entity-eviction cap ships, so a resident kern's
-in-RAM HNSW grows unbounded). Execution plan:
-`docs/superpowers/plans/2026-06-12-diskann-wiring.md`.
+in-RAM HNSW grows unbounded).
+
+How it works:
+- `GraphGnn`'s entity/gnn/reason indices are a `VectorBackend` enum
+  (`src/base/vector_backend.rs`): `Resident(HnswIndex)` or `Disk { snapshot:
+  DiskIndex, delta: HnswIndex, tombstones }`.
+- `rebuild_index` spills `entity_idx` to a `<data_dir>/diskann/entity` DiskANN
+  snapshot once the resident searchable-entity count exceeds `[graph]
+  disk_threshold` (default `KERN_CAP_DISABLED` = **never spill**, so small
+  deployments are byte-for-byte unchanged). A build/open failure falls back to the
+  in-RAM index — a disk error never breaks the graph.
+- Post-snapshot writes buffer in the in-RAM `delta` (with tombstones shadowing
+  stale/removed snapshot ids). A tick-driven `DiskConsolidate` task folds the
+  delta back into a fresh snapshot once it grows past
+  `DISK_CONSOLIDATE_MIN_DELTA`, at most hourly, so the delta stays bounded.
+
+Still standalone (`src/base/diskann.rs`): `build_and_save` + mmap
+`DiskIndex::open`/`search`, recall@10 ≥ 0.90 vs brute force.
+
+**Not yet done (follow-ups):** `gnn_entity_idx`/`reason_idx` still stay resident
+(entity-only spill); no product quantization yet — `DiskIndex` mmaps full `f32`
+vectors (PQ-in-RAM, the RAM-of-codes optimization below, is the next step).
+Execution plan: `docs/superpowers/plans/2026-06-12-diskann-wiring.md`.
 
 > **Reality drift since this doc was written.** The original Phase-1 target below
 > (replace `cold.rs`'s O(n) JSONL scan) is OBSOLETE: `cold.rs` and `persist.rs`
