@@ -44,6 +44,20 @@ pub fn cmp_partial<T: PartialOrd>(a: &T, b: &T) -> std::cmp::Ordering {
 	a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
 }
 
+/// Deterministic ranking order for a top-k result set: higher `score` first,
+/// ties broken by `id` ascending. NaN/incomparable scores fall back to `Equal`
+/// (via [`cmp_partial`]). When the `id`s are unique this is a STRICT total order,
+/// which is what makes a `select_nth`/`truncate` top-k reproducible across runs
+/// despite HashMap/scan source order.
+///
+/// Single source of truth for the score-desc-id-asc tiebreak shared by
+/// `fuse::rrf`, `pagerank`, `search::merge_hits`, `LexicalIndex::search`, and
+/// `Store::cold_search`. Adding the tiebreak here once stops new ranking sites
+/// from silently regressing to nondeterministic source-order ties.
+pub fn cmp_rank<S: PartialOrd>(a_score: S, a_id: &str, b_score: S, b_id: &str) -> std::cmp::Ordering {
+	cmp_partial(&b_score, &a_score).then_with(|| a_id.cmp(b_id))
+}
+
 /// Wall-clock nanoseconds since the Unix epoch. Single source for the
 /// `SystemTime::now().duration_since(UNIX_EPOCH)` stamp used to mint
 /// gossip message ids.
@@ -93,6 +107,23 @@ mod tests {
 	fn hex_encode_is_lowercase_two_chars_per_byte() {
 		assert_eq!(hex::encode([0x00, 0xff, 0x10, 0xab]), "00ff10ab");
 		assert_eq!(hex::encode([]), "");
+	}
+
+	#[test]
+	fn cmp_rank_orders_by_score_desc_then_id_asc() {
+		use std::cmp::Ordering;
+		// Higher score ranks first regardless of id.
+		assert_eq!(cmp_rank(0.9_f64, "z", 0.1, "a"), Ordering::Less);
+		assert_eq!(cmp_rank(0.1_f64, "a", 0.9, "z"), Ordering::Greater);
+		// Equal score -> id ascending decides (a before b).
+		assert_eq!(cmp_rank(0.5_f64, "a", 0.5, "b"), Ordering::Less);
+		assert_eq!(cmp_rank(0.5_f64, "b", 0.5, "a"), Ordering::Greater);
+		// Fully equal -> Equal.
+		assert_eq!(cmp_rank(0.5_f64, "a", 0.5, "a"), Ordering::Equal);
+		// NaN score falls back to the id tiebreak rather than panicking.
+		assert_eq!(cmp_rank(f64::NAN, "a", f64::NAN, "b"), Ordering::Less);
+		// Works for f32 scores too (lexical BM25 path).
+		assert_eq!(cmp_rank(2.0_f32, "a", 1.0_f32, "z"), Ordering::Less);
 	}
 
 	#[test]

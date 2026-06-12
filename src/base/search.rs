@@ -1,7 +1,7 @@
 use super::graph::GraphGnn;
 use super::hnsw::HnswHit;
 use super::types::{Reason, Entity};
-use super::util::cmp_partial;
+use super::util::cmp_rank;
 
 #[derive(Debug, Clone)]
 pub struct EntityHit {
@@ -54,7 +54,7 @@ fn merge_hits(primary: Vec<HnswHit>, gnn: Vec<HnswHit>, k: usize) -> Vec<EntityH
 	// order a deterministic total order (the source is a HashMap, whose iteration
 	// order is not stable across runs), so which equal-score hits survive the
 	// `truncate(k)` boundary is reproducible — same convention as fuse::rrf.
-	ranked.sort_by(|a, b| cmp_partial(&b.1, &a.1).then_with(|| a.0.cmp(&b.0)));
+	ranked.sort_by(|a, b| cmp_rank(a.1, &a.0, b.1, &b.0));
 	ranked.truncate(k);
 	ranked.into_iter().map(EntityHit::from).collect()
 }

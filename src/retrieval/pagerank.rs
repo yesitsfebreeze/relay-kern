@@ -120,10 +120,7 @@ pub fn pagerank(
 	// entries compare Equal — so a top-k partition followed by sorting only those k
 	// yields exactly the same result as a full sort + take.
 	let cmp = |a: &(usize, f64), b: &(usize, f64)| {
-		b.1
-			.partial_cmp(&a.1)
-			.unwrap_or(std::cmp::Ordering::Equal)
-			.then_with(|| ids[a.0].cmp(&ids[b.0]))
+		crate::base::util::cmp_rank(a.1, &ids[a.0], b.1, &ids[b.0])
 	};
 	// Partition the top-k into [0, take) in O(n) average instead of fully sorting
 	// all n entities in O(n log n). pagerank runs per query over the entire entity

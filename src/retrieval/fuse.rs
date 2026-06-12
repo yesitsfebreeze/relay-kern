@@ -32,10 +32,7 @@ pub fn rrf(
 	// reproducible and tests deterministic. Because `agg`'s keys are unique entity
 	// ids, this is a STRICT total order: no two distinct entries compare Equal.
 	let cmp = |a: &EntityHit, b: &EntityHit| {
-		b.score
-			.partial_cmp(&a.score)
-			.unwrap_or(std::cmp::Ordering::Equal)
-			.then_with(|| a.entity_id.cmp(&b.entity_id))
+		crate::base::util::cmp_rank(a.score, &a.entity_id, b.score, &b.entity_id)
 	};
 	// Only top_k of a potentially large fused union is delivered, so partition the
 	// top_k into [0, top_k) in O(n) average with select_nth instead of fully

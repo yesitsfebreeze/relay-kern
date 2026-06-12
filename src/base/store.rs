@@ -425,9 +425,7 @@ impl Store {
 		// Cosine descending, ties broken by entity id ascending. The id tiebreak
 		// makes the truncation deterministic — the cold rows come from an LMDB scan
 		// whose order must not decide which equal-cosine entities survive `take k`.
-		scored.sort_by(|a, b| {
-			crate::base::util::cmp_partial(&b.1, &a.1).then_with(|| a.0.id.cmp(&b.0.id))
-		});
+		scored.sort_by(|a, b| crate::base::util::cmp_rank(a.1, &a.0.id, b.1, &b.0.id));
 		scored.truncate(k);
 		Ok(scored)
 	}
