@@ -605,6 +605,48 @@ mod tests {
 		assert_eq!(g.count(), 2, "exactly one generic child created, no runaway");
 	}
 
+	#[test]
+	fn unnamed_child_not_duplicated_when_non_root_parent_evicts() {
+		// Gap in `unnamed_child_reused_when_evicted_by_load_cap`: there the parent is
+		// the ROOT, which the load cap never evicts. The empty-kern bloat that grew a
+		// real daemon to 178k kerns came from DEEP trees, where the parent is itself a
+		// non-root kern the cap spills to disk AFTER its unnamed child is linked.
+		// Reuse must then survive a round-trip through disk for the PARENT too:
+		// `unload` persists the parent's `children` before dropping it, so the
+		// reloaded parent still points at the child and no fresh one is spawned. This
+		// locks "don't create useless data" for the exact scenario behind the bloat.
+		let dir = tempfile::tempdir().unwrap();
+		let mut g = GraphGnn::new();
+		g.data_dir = dir.path().to_string_lossy().into_owned();
+		g.set_store(std::sync::Arc::new(
+			crate::base::store::Store::open(&g.data_dir).unwrap(),
+		));
+		g.set_max_loaded_kerns(1); // only the root stays resident; parent + child spill
+		let root = g.root.id.clone();
+		let root_net = g.root.root_id.clone();
+
+		// A named (immortal) child of root to act as the non-root parent that evicts.
+		let parent = {
+			let p = Kern::new_named_child(&root, &root_net, "parent-anchor", vec![1.0, 0.0]);
+			let pid = p.id.clone();
+			g.register(p);
+			if let Some(r) = g.get_mut(&root) {
+				if !r.children.contains(&pid) {
+					r.children.push(pid.clone());
+				}
+			}
+			pid
+		};
+
+		let first = get_or_spawn_unnamed_child(&mut g, &parent);
+		for _ in 0..20 {
+			let id = get_or_spawn_unnamed_child(&mut g, &parent);
+			assert_eq!(id, first, "reuse the unnamed child even when the non-root parent evicted");
+		}
+		// root + parent + exactly one unnamed child. No per-call runaway.
+		assert_eq!(g.count(), 3, "no runaway: root + parent + one unnamed child");
+	}
+
 	/// The orphan-shard leak that grew the data dir to 347k files was empty,
 	/// unnamed kerns left behind by routing. The accept path must NEVER leave
 	/// one: a duplicate must short-circuit before any spawn, and a spawned
