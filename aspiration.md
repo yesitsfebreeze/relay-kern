@@ -233,7 +233,8 @@ Status markers below were checked against the **working tree atop `9683c5c`**
 | Snapshots / WAL / restore = ❌ | no backup/restore/WAL fns in `persist.rs` |
 | Recommend/Discover/distance-matrix = ❌ | no such fns repo-wide |
 | REST surface qualifier | viewer axum routes (`viewer/mod.rs`) + `kern_rpc`; no public REST/gRPC/SDK |
-| Test surface | 562 `#[test]`/`#[tokio::test]` fns across 114 files (pass count needs a fresh `cargo test`) |
+| Test surface | **799 lib + 1 integration tests PASS** (verified `cargo test` 2026-06-12 atop `84ba856`); ~962 `#[test]`/`#[tokio::test]` attrs across 170 src files |
 
-*Unverified (needs a run, not a grep):* live `cargo test` pass count; actual
-recall@k / p50-p99 latency vs Qdrant (the Tier-0 harness, still ❌).
+*Unverified (needs a run, not a grep):* actual recall@k / p50-p99 latency vs
+Qdrant (the Tier-0 harness, still ❌). *(The live `cargo test` pass count is now
+verified — see the Test-surface row above.)*
