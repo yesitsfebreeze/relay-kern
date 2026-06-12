@@ -105,3 +105,43 @@ default).
 - Windows mmap: `memmap2` + single-writer daemon (already relied on by the store).
 - Default off: ship `disk_threshold` high so existing small deployments are
   unchanged until a kern actually crosses the ceiling.
+
+## Status: I0–I8 COMPLETE (wired, opt-in, tested, documented)
+
+Shipped on `feat/condensation-forest`: `ccf4b77 dc56284 01490cf dbf451b 7b39198
+5468e20 6e045e9 c608088 1870df6`. Persona panel run; the config-inert startup bug
+it found is fixed (`1870df6`, `apply_graph_config`). Crash/data safety judged sound
+(the snapshot is a rebuildable cache, rebuilt from the LMDB source-of-truth on
+load). 831/831 lib tests pass, clippy clean (excl. the pre-existing, unrelated
+`store.rs:519` lint).
+
+## Follow-up backlog (from the persona panel — not blockers for the opt-in feature)
+
+Ordered by production importance. Each is its own careful increment, NOT a loop
+quick-fix:
+
+1. **Non-blocking consolidate (highest).** `consolidate_disk_index` holds the graph
+   write lock across the whole Vamana rebuild — a pause scaling with corpus size.
+   Fix: two-phase — under a brief write lock, swap in a fresh transitional delta so
+   new writes route there; build the new snapshot OUTSIDE the lock from a
+   point-in-time item snapshot; under a second brief lock, install
+   `Disk { new_snapshot, delta: transitional, tombstones: transitional }`. Needs a
+   transitional write-routing state on `VectorBackend` and its own tests — a naive
+   lock-release either loses concurrent writes or fails to shrink the delta.
+   (The whole sync tick loop blocking the tokio worker without `spawn_blocking` is a
+   separate, pre-existing architectural item, not unique to DiskANN.)
+2. **Multi-writer snapshot dir.** Two daemons (or a CLI/hook with spilling enabled)
+   on one `data_dir` would clobber `<data_dir>/diskann/entity`. Add a lock /
+   per-instance subdir, or document+enforce the store's single-writer-per-`data_dir`
+   model for the snapshot too.
+3. **Snapshot model/dim signature.** Stamp the snapshot dir with the embed
+   model+dim so a stale snapshot can never be read at the wrong dimension (today
+   mitigated only by rebuild-on-load).
+4. **Tombstone-churn recall floor.** I7 measures only the fresh snapshot; add a
+   recall test after heavy deletes/updates (pre-consolidate) to bound the floor.
+
+## Deferred (vision, separate efforts)
+
+- `gnn_entity_idx` + `reason_idx` disk spill (entity-only today).
+- PQ-in-RAM: compress resident codes (the doc's original Vamana+PQ decomposition);
+  current `DiskIndex` mmaps full `f32` vectors.

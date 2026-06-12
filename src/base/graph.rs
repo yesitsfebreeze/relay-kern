@@ -296,6 +296,17 @@ impl GraphGnn {
 	/// entity is also stored there — so this re-snapshots from kerns (identical
 	/// live membership, Superseded/forgotten ids naturally dropped), not from the
 	/// delta. A build failure falls back to a correct in-RAM rebuild.
+	///
+	/// COST: the full Vamana `build_and_save` runs inline, and the tick dispatcher
+	/// (`do_disk_consolidate`) holds the graph WRITE lock for its whole duration —
+	/// a maintenance pause that scales with the resident entity count, blocking all
+	/// reads/writes meanwhile. This matches the tick's serialized model (every task
+	/// holds the write lock), and it is gated to fire at most hourly and only past
+	/// `DISK_CONSOLIDATE_MIN_DELTA`, so it is rare; but on a very large corpus it is
+	/// a stop-the-world stall. A non-blocking two-phase consolidate (build outside
+	/// the lock against a transitional write-routing delta, swap under a brief lock)
+	/// is the planned follow-up — see the backlog in
+	/// `docs/superpowers/plans/2026-06-12-diskann-wiring.md`.
 	pub fn consolidate_disk_index(&mut self) {
 		if !matches!(self.entity_idx, VectorBackend::Disk { .. }) {
 			return;
