@@ -77,7 +77,7 @@ pub fn render_timeline(profiles: &[Profile], width: usize) -> String {
 		let mut bar = String::new();
 		if p.checkpoints.is_empty() {
 			let n = ((p.total_ms / max) * width as f64).round() as usize;
-			bar.extend(std::iter::repeat('█').take(n.max(1)));
+			bar.extend(std::iter::repeat_n('█', n.max(1)));
 		} else {
 			for (i, c) in p.checkpoints.iter().enumerate() {
 				// Floor a positive stage to at least one cell: rounding alone
@@ -88,7 +88,7 @@ pub fn render_timeline(profiles: &[Profile], width: usize) -> String {
 				} else {
 					0
 				};
-				bar.extend(std::iter::repeat(FILLS[i % FILLS.len()]).take(n));
+				bar.extend(std::iter::repeat_n(FILLS[i % FILLS.len()], n));
 			}
 			if bar.is_empty() {
 				bar.push('█');

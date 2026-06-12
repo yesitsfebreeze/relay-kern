@@ -309,7 +309,7 @@ pub(crate) fn draw_frame(
 
     // Fake cursor: only the focused pane gets a cursor_pos; others get None.
     let main_cursor = if registry.focus == 0 {
-        registry.panes.get(0).map(|p| p.parser.screen().cursor_position())
+        registry.panes.first().map(|p| p.parser.screen().cursor_position())
     } else {
         None
     };
@@ -319,7 +319,7 @@ pub(crate) fn draw_frame(
         None
     };
 
-    if let Some(main) = registry.panes.get(0) {
+    if let Some(main) = registry.panes.first() {
         let snap = snapshots.entry(main.id.clone()).or_insert_with(|| ScreenSnapshot::new(0, 0));
         draw_pane_diff(stdout, main.parser.screen(), snap, 0, left_cols, pane_rows, row_offset, main_cursor)?;
     }
@@ -405,6 +405,7 @@ pub(crate) fn draw_status_bar(
 /// bit toggled, producing a fake block cursor without moving the real terminal
 /// cursor. Pass `None` for unfocused panes; the real cursor stays hidden the
 /// whole time.
+#[allow(clippy::too_many_arguments)]
 fn draw_pane_diff(
     stdout: &mut impl Write,
     screen: &vt100::Screen,

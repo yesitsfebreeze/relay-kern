@@ -13,7 +13,7 @@
 /// multi-byte in the fixed slice region, non-numeric fields, or a pre-epoch
 /// result) rather than panicking — the input is reachable from untrusted MCP
 /// `since`/`before`/`valid_at` arguments.
-pub fn parse_rfc3339(s: &str) -> Result<std::time::SystemTime, ()> {
+pub(crate) fn parse_rfc3339(s: &str) -> Result<std::time::SystemTime, ()> {
 	let s = s.trim();
 	// All fixed-offset slices below read bytes 0..19. Validate length AFTER
 	// trimming and require those bytes to be ASCII so the slicing can never

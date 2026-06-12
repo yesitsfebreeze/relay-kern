@@ -343,7 +343,7 @@ impl HnswIndex {
 				// yet, or it could beat the worst match. Non-matching nodes are still
 				// pushed to the frontier — that is how we reach matches behind them.
 				let worst = results.peek().map(|w| w.dist);
-				let explore = results.len() < ef || worst.map_or(true, |w| d < w);
+				let explore = results.len() < ef || worst.is_none_or(|w| d < w);
 				if explore {
 					candidates.push(Candidate {
 						id: nb_id.clone(),
