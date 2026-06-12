@@ -372,7 +372,7 @@ mod tests {
 		let removed = forget_entity(&mut g, "a").expect("non-fact forget succeeds");
 		assert_eq!(removed, 2, "both incident edges went with a");
 		let kern = g.kerns.get("kx").expect("kern present");
-		assert!(kern.entities.get("a").is_none(), "a is gone from the kern");
+		assert!(!kern.entities.contains_key("a"), "a is gone from the kern");
 		assert!(kern.entities.contains_key("b"), "neighbours survive");
 	}
 

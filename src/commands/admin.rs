@@ -214,8 +214,10 @@ mod cmd_tests {
 
 	fn temp_cfg() -> (tempfile::TempDir, Config) {
 		let dir = tempfile::tempdir().expect("tempdir");
-		let mut cfg = Config::default();
-		cfg.data_dir = dir.path().to_string_lossy().into_owned();
+		let cfg = Config {
+			data_dir: dir.path().to_string_lossy().into_owned(),
+			..Default::default()
+		};
 		(dir, cfg)
 	}
 

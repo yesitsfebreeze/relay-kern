@@ -364,8 +364,8 @@ mod tests {
 
 		let k = g.kerns.get("k").unwrap();
 		assert!(!k.entities.contains_key("a"), "entity removed from map");
-		assert!(k.by_from.get("a").is_none(), "by_from[a] purged");
-		assert!(k.by_to.get("a").is_none(), "by_to[a] purged");
+		assert!(!k.by_from.contains_key("a"), "by_from[a] purged");
+		assert!(!k.by_to.contains_key("a"), "by_to[a] purged");
 		assert!(k.reasons.is_empty(), "both incident reasons removed (a->b and b->a)");
 		assert!(collect_reason_ids(k, "b").is_empty(), "b left with no dangling edges");
 		// HNSW purge: a gone (b stays); both reasons gone.

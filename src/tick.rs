@@ -248,6 +248,43 @@ fn evict_empty_children(graph: &mut GraphGnn, kern_id: &str) -> bool {
 	evicted
 }
 
+
+pub fn enqueue_all(q: &Queue, g: &Arc<RwLock<GraphGnn>>) {
+	let graph = read_recovered(g);
+	for kern in graph.all() {
+		if !kern.entities.is_empty() {
+			q.enqueue(task(TaskKind::Cluster, &kern.id));
+		}
+	}
+}
+
+pub fn tick_sync(
+	g: &Arc<RwLock<GraphGnn>>,
+	kern_id: &str,
+	llm: Option<&LlmFunc>,
+	embed: Option<&EmbedFunc>,
+	bq: Option<&BroadcastQuestionFunc>,
+) {
+	let q = Queue::new(256);
+	q.enqueue(task(TaskKind::Cluster, kern_id));
+
+	let ctx = TickContext {
+		llm: llm.cloned(),
+		embed: embed.cloned(),
+		broadcast_q: bq.cloned(),
+		gnn_cfg: GnnConfig::defaults(),
+		tick_cfg: TickConfig::default(),
+	};
+
+	let gg = Arc::clone(g);
+	let mut rx = q.take_receiver().unwrap();
+	while let Ok(t) = rx.try_recv() {
+		q.dequeued(&t);
+		process_task(&q, &gg, &t, &ctx);
+		q.done();
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -373,41 +410,5 @@ mod tests {
 		}
 		let gnn = kinds.iter().filter(|k| matches!(k, TaskKind::GnnPropagate)).count();
 		assert_eq!(gnn, 0, "no structural change -> GNN propagation skipped");
-	}
-}
-
-pub fn enqueue_all(q: &Queue, g: &Arc<RwLock<GraphGnn>>) {
-	let graph = read_recovered(g);
-	for kern in graph.all() {
-		if !kern.entities.is_empty() {
-			q.enqueue(task(TaskKind::Cluster, &kern.id));
-		}
-	}
-}
-
-pub fn tick_sync(
-	g: &Arc<RwLock<GraphGnn>>,
-	kern_id: &str,
-	llm: Option<&LlmFunc>,
-	embed: Option<&EmbedFunc>,
-	bq: Option<&BroadcastQuestionFunc>,
-) {
-	let q = Queue::new(256);
-	q.enqueue(task(TaskKind::Cluster, kern_id));
-
-	let ctx = TickContext {
-		llm: llm.cloned(),
-		embed: embed.cloned(),
-		broadcast_q: bq.cloned(),
-		gnn_cfg: GnnConfig::defaults(),
-		tick_cfg: TickConfig::default(),
-	};
-
-	let gg = Arc::clone(g);
-	let mut rx = q.take_receiver().unwrap();
-	while let Ok(t) = rx.try_recv() {
-		q.dequeued(&t);
-		process_task(&q, &gg, &t, &ctx);
-		q.done();
 	}
 }

@@ -233,7 +233,7 @@ mod tests {
 
 	#[test]
 	fn vector_cluster_identical_vectors_collapse_to_one() {
-		let m = vec![
+		let m = [
 			ent("a", vec![1.0, 0.0]),
 			ent("b", vec![1.0, 0.0]),
 			ent("c", vec![1.0, 0.0]),

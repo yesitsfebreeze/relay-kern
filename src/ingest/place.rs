@@ -241,6 +241,59 @@ pub fn chunk_source_id(source: &Source, index: usize) -> String {
 	format!("{}#chunk{}", source.section(), index)
 }
 
+
+pub(crate) fn generate_questions(
+	graph: &Arc<RwLock<GraphGnn>>,
+	llm_fn: &LlmFunc,
+	result: &accept::AcceptResult,
+	chunk_text: &str,
+) {
+	let prompt = format!(
+		"Given this knowledge chunk, generate up to 3 questions that this chunk answers. \
+		 One question per line. No numbering.\n\n{chunk_text}"
+	);
+	let response = llm_fn(&prompt);
+	if response.is_empty() {
+		return;
+	}
+
+	let questions: Vec<&str> = response
+		.lines()
+		.map(|l| l.trim())
+		.filter(|l| !l.is_empty())
+		.take(3)
+		.collect();
+
+	// Single write acquisition: read the root id from the same guard we mutate
+	// under, so there is no TOCTOU window between picking the root and editing it
+	// (and one fewer lock round-trip).
+	let mut g = match graph.write() {
+		Ok(g) => g,
+		Err(_) => return,
+	};
+	let root_id = g.root.id.clone();
+	for q in questions {
+		let rid = math::reason_id(&result.entity_id, "", ReasonKind::Question, q, "");
+		let reason = Reason {
+			id: rid,
+			from: result.entity_id.clone(),
+			to: String::new(),
+			to_kern_id: String::new(),
+			to_net_id: String::new(),
+			kind: ReasonKind::Question,
+			dirty: false,
+			text: q.to_string(),
+			vector: Vec::new(),
+			score: 0.5,
+			traversal_count: GCounter::new(),
+			producer_id: String::new(),
+		};
+		if let Some(kern) = g.get_mut(&root_id) {
+			crate::base::reason::add_reason(kern, reason);
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -371,57 +424,5 @@ mod tests {
 		assert!(id.is_none(), "no entity id is returned when embedding fails");
 		assert!(fail.is_some(), "a failure report is surfaced");
 		assert_eq!(total_entity_count(&g), 0, "graph is untouched on embed failure");
-	}
-}
-
-pub(crate) fn generate_questions(
-	graph: &Arc<RwLock<GraphGnn>>,
-	llm_fn: &LlmFunc,
-	result: &accept::AcceptResult,
-	chunk_text: &str,
-) {
-	let prompt = format!(
-		"Given this knowledge chunk, generate up to 3 questions that this chunk answers. \
-		 One question per line. No numbering.\n\n{chunk_text}"
-	);
-	let response = llm_fn(&prompt);
-	if response.is_empty() {
-		return;
-	}
-
-	let questions: Vec<&str> = response
-		.lines()
-		.map(|l| l.trim())
-		.filter(|l| !l.is_empty())
-		.take(3)
-		.collect();
-
-	// Single write acquisition: read the root id from the same guard we mutate
-	// under, so there is no TOCTOU window between picking the root and editing it
-	// (and one fewer lock round-trip).
-	let mut g = match graph.write() {
-		Ok(g) => g,
-		Err(_) => return,
-	};
-	let root_id = g.root.id.clone();
-	for q in questions {
-		let rid = math::reason_id(&result.entity_id, "", ReasonKind::Question, q, "");
-		let reason = Reason {
-			id: rid,
-			from: result.entity_id.clone(),
-			to: String::new(),
-			to_kern_id: String::new(),
-			to_net_id: String::new(),
-			kind: ReasonKind::Question,
-			dirty: false,
-			text: q.to_string(),
-			vector: Vec::new(),
-			score: 0.5,
-			traversal_count: GCounter::new(),
-			producer_id: String::new(),
-		};
-		if let Some(kern) = g.get_mut(&root_id) {
-			crate::base::reason::add_reason(kern, reason);
-		}
 	}
 }

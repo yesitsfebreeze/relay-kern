@@ -574,7 +574,8 @@ mod cacheable_tests {
 	fn any_filter_or_nondefault_sort_disables_caching() {
 		// Each mutation alone must flip cacheable to false: a filter changes the
 		// result set and a sort changes the order, both for the same query vector.
-		let cases: Vec<(&str, fn(&mut QueryArgs))> = vec![
+		type Mutator = fn(&mut QueryArgs);
+		let cases: Vec<(&str, Mutator)> = vec![
 			("source", |p| p.source = "github".into()),
 			("kind", |p| p.kind = Some(EntityKind::Fact)),
 			("scheme", |p| p.scheme = Some("file".into())),

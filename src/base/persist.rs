@@ -480,7 +480,7 @@ mod tests {
 		let d = dir.path().to_string_lossy().to_string();
 		save_kern(&d, &Kern::new("root", "")).unwrap();
 		for i in 0..64 {
-			save_kern(&d, &Kern::new(&format!("child{i}"), "root")).unwrap();
+			save_kern(&d, &Kern::new(format!("child{i}"), "root")).unwrap();
 		}
 		fs::write(format!("{d}/bad.kern"), b"not a valid bincode kern").unwrap();
 

@@ -360,11 +360,13 @@ mod tests {
 		r.n_queries = 4;
 		r.total_claims = 20;
 		r.latencies_ms = vec![10, 20, 80, 120];
-		let mut agg = CatAgg::default();
-		agg.n = 4;
-		agg.f1 = 3.2;
-		agg.rouge = 2.8;
-		agg.judge_correct = 3;
+		let agg = CatAgg {
+			n: 4,
+			f1: 3.2,
+			rouge: 2.8,
+			judge_correct: 3,
+			..Default::default()
+		};
 		r.per_category.insert(0, agg);
 		let s = r.summary();
 		assert!(s.contains("samples: 2"), "samples in header");

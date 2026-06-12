@@ -166,8 +166,10 @@ mod tests {
 		let dir = std::env::temp_dir().join(format!("kern_profile_smoke_{}", std::process::id()));
 		std::fs::create_dir_all(&dir).unwrap();
 
-		let mut cfg = crate::config::Config::default();
-		cfg.data_dir = dir.to_string_lossy().into_owned();
+		let mut cfg = crate::config::Config {
+			data_dir: dir.to_string_lossy().into_owned(),
+			..Default::default()
+		};
 		cfg.embed.url = embed_url;
 
 		// no_llm=true → the reason/answer stages are skipped entirely.

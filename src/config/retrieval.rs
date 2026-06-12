@@ -213,17 +213,21 @@ mod tests {
 
 	#[test]
 	fn adaptive_ef_start_above_max_is_flagged() {
-		let mut cfg = RetrievalConfig::default();
-		cfg.adaptive_ef_start = 200;
-		cfg.adaptive_ef_max = 128;
+		let cfg = RetrievalConfig {
+			adaptive_ef_start: 200,
+			adaptive_ef_max: 128,
+			..Default::default()
+		};
 		assert!(cfg.validate().iter().any(|e| e.contains("adaptive_ef_start")));
 	}
 
 	#[test]
 	fn out_of_range_unit_interval_fields_are_flagged() {
-		let mut cfg = RetrievalConfig::default();
-		cfg.query_cache_theta = 1.5;
-		cfg.mmr_lambda = -0.1;
+		let cfg = RetrievalConfig {
+			query_cache_theta: 1.5,
+			mmr_lambda: -0.1,
+			..Default::default()
+		};
 		let errs = cfg.validate();
 		assert!(errs.iter().any(|e| e.contains("query_cache_theta")), "got {errs:?}");
 		assert!(errs.iter().any(|e| e.contains("mmr_lambda")), "got {errs:?}");
