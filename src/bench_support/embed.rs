@@ -9,7 +9,12 @@
 
 use crate::base::util::content_hash;
 
-pub const DIM: usize = 64;
+// 256 (not 64): each token deposits 4 signed values, so a ~10-token document
+// writes ~40 slots — into 64 that is ~40% collisions, which drowns the
+// token-overlap signal and makes the dense leg near-noise. 256 cuts collisions
+// ~4x, so cosine tracks real token overlap and the bench's dense recall becomes
+// faithful. Still tiny vs a real 768-d model; bench-only.
+pub const DIM: usize = 256;
 
 pub fn embed(text: &str) -> Vec<f64> {
 	let mut v = vec![0.0f64; DIM];
