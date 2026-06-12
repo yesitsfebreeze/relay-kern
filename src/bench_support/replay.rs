@@ -215,6 +215,33 @@ mod tests {
 	}
 
 	#[test]
+	fn filtered_query_survives_delivery_pool_truncation() {
+		// Like the buried-minority test but with 60 Claims (> the ~50 delivery cap),
+		// so filter_delivery truncates BEFORE the filter could run. Identical text
+		// connects every doc, so expansion floods the pool with non-matching Claims.
+		// If the filter is applied only after truncation, the id-trailing Facts get
+		// cut and recall@10 collapses. A correct order keeps recall@10 = 1.0.
+		let text = "rust ownership and the borrow checker semantics".to_string();
+		let mut docs: Vec<TraceDoc> = (0..60).map(|i| doc(&format!("c{i:03}"), &text)).collect();
+		docs.push(doc_kind("fact0", &text, "fact"));
+		docs.push(doc_kind("fact1", &text, "fact"));
+		let trace = Trace {
+			name: "big-buried".into(),
+			docs,
+			queries: vec![TraceQuery {
+				id: "q".into(),
+				query: text,
+				expected_ids: vec!["fact0".into(), "fact1".into()],
+				mode: "hybrid".into(),
+				filter_kind: Some("fact".into()),
+			}],
+		};
+		let g = build_graph(&trace);
+		let recall = replay(&g, &RetrievalConfig::default(), &trace).mean_recall10;
+		assert_eq!(recall, 1.0, "Facts must survive pool truncation under an active filter");
+	}
+
+	#[test]
 	fn replay_of_empty_trace_is_zero_mean() {
 		let trace = Trace { name: "empty".into(), docs: vec![], queries: vec![] };
 		let g = build_graph(&trace);

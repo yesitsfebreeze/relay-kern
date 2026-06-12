@@ -154,6 +154,19 @@ pub fn retrieve(
 	let chains = expanded.chains;
 
 	score::apply_boosts(cfg, &mut results);
+	// Apply an active metadata filter BEFORE the delivery-pool truncation. Graph
+	// expansion can flood `results` with non-matching neighbours of the (filtered)
+	// seeds, and filter_delivery truncates to the pool cap by score — so filtering
+	// only afterwards (in apply_query_options) lets those non-matching entities crowd
+	// matching ones out of the cap, a fewer-than-k loss the seed-level filtering
+	// alone does not prevent. Filtering first means the truncation only drops a
+	// non-matching tail. apply_query_options below still runs for its sort (its
+	// retain is then a no-op).
+	if let Some(o) = opts {
+		if o.is_active() {
+			results.retain(|r| score::matches_filter(&r.entity, o));
+		}
+	}
 	score::filter_delivery(cfg, &mut results);
 
 	if let Some(opts) = opts {
