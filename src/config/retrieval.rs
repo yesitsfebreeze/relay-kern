@@ -190,6 +190,21 @@ impl RetrievalConfig {
 			errs.push(format!("pagerank_damping ({}) must be in [0.0, 1.0)", self.pagerank_damping));
 		}
 
+		// Fields whose out-of-range value silently breaks retrieval (no graceful
+		// fallback, and no valid use of the bad value — unlike e.g.
+		// important_min_cosine > 1.0, which is a deliberate "disable").
+		if self.rrf_k < 0.0 {
+			// fuse::rrf scores 1/(rrf_k + rank), rank >= 1: a negative rrf_k drives
+			// the denominator to <= 0, inverting or NaN-ing the fusion.
+			errs.push(format!("rrf_k ({}) must be >= 0.0", self.rrf_k));
+		}
+		if self.seed_k == 0 {
+			errs.push("seed_k must be >= 1 (0 seeds nothing, so every query is empty)".to_string());
+		}
+		if self.max_deliver_results == 0 {
+			errs.push("max_deliver_results must be >= 1 (0 delivers nothing)".to_string());
+		}
+
 		errs
 	}
 }
@@ -231,5 +246,28 @@ mod tests {
 		let errs = cfg.validate();
 		assert!(errs.iter().any(|e| e.contains("query_cache_theta")), "got {errs:?}");
 		assert!(errs.iter().any(|e| e.contains("mmr_lambda")), "got {errs:?}");
+	}
+
+	#[test]
+	fn retrieval_breaking_values_are_flagged() {
+		// Each silently breaks every query if it slips through unvalidated.
+		let neg_rrf = RetrievalConfig { rrf_k: -1.0, ..Default::default() };
+		assert!(neg_rrf.validate().iter().any(|e| e.contains("rrf_k")), "negative rrf_k");
+
+		let zero_seed = RetrievalConfig { seed_k: 0, ..Default::default() };
+		assert!(zero_seed.validate().iter().any(|e| e.contains("seed_k")), "seed_k 0");
+
+		let zero_deliver = RetrievalConfig { max_deliver_results: 0, ..Default::default() };
+		assert!(
+			zero_deliver.validate().iter().any(|e| e.contains("max_deliver_results")),
+			"max_deliver_results 0"
+		);
+
+		// rrf_k == 0 is valid (1/(0+rank) is well-defined RRF), so it must NOT flag.
+		let zero_rrf = RetrievalConfig { rrf_k: 0.0, ..Default::default() };
+		assert!(
+			!zero_rrf.validate().iter().any(|e| e.contains("rrf_k")),
+			"rrf_k 0 is valid, must not flag"
+		);
 	}
 }
