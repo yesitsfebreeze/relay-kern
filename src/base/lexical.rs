@@ -85,10 +85,14 @@ impl LexicalIndex {
 				score: s,
 			})
 			.collect();
+		// Score descending, ties broken by entity_id ascending so the set that
+		// survives `truncate(k)` is reproducible across runs (the source is a
+		// HashMap with unstable iteration order) — same convention as fuse::rrf.
 		hits.sort_by(|a, b| {
 			b.score
 				.partial_cmp(&a.score)
 				.unwrap_or(std::cmp::Ordering::Equal)
+				.then_with(|| a.entity_id.cmp(&b.entity_id))
 		});
 		hits.truncate(k);
 		hits

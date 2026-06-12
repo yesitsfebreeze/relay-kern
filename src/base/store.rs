@@ -422,7 +422,12 @@ impl Store {
 				}
 			})
 			.collect();
-		scored.sort_by(|a, b| crate::base::util::cmp_partial(&b.1, &a.1));
+		// Cosine descending, ties broken by entity id ascending. The id tiebreak
+		// makes the truncation deterministic — the cold rows come from an LMDB scan
+		// whose order must not decide which equal-cosine entities survive `take k`.
+		scored.sort_by(|a, b| {
+			crate::base::util::cmp_partial(&b.1, &a.1).then_with(|| a.0.id.cmp(&b.0.id))
+		});
 		scored.truncate(k);
 		Ok(scored)
 	}
@@ -742,5 +747,24 @@ mod tests {
 		assert!(s.cold_get("new").unwrap().is_some(), "newest kept");
 		assert!(s.cold_get("mid").unwrap().is_some(), "second-newest kept");
 		assert!(s.cold_get("old").unwrap().is_none(), "oldest evicted");
+	}
+
+	#[test]
+	fn cold_search_breaks_cosine_ties_by_id_ascending() {
+		let d = tmp();
+		let s = Store::open(&dir_of(&d)).unwrap();
+		// Identical vectors -> identical cosine to the query. Spill the higher id
+		// first so only the id tiebreak (not scan/insert order) can pick the winner
+		// that survives `truncate(1)`. This pins the deterministic-ranking contract.
+		let mut eb = mk_entity("b", "dup", 0.0, EntityKind::Claim);
+		eb.vector = vec![1.0, 0.0];
+		let mut ea = mk_entity("a", "dup", 0.0, EntityKind::Claim);
+		ea.vector = vec![1.0, 0.0];
+		s.cold_spill(&eb).unwrap();
+		s.cold_spill(&ea).unwrap();
+
+		let hits = s.cold_search(&[1.0, 0.0], 1).unwrap();
+		assert_eq!(hits.len(), 1);
+		assert_eq!(hits[0].0.id, "a", "equal-cosine tie resolved to id-ascending winner");
 	}
 }

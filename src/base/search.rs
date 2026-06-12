@@ -50,7 +50,11 @@ fn merge_hits(primary: Vec<HnswHit>, gnn: Vec<HnswHit>, k: usize) -> Vec<EntityH
 		return Vec::new();
 	}
 	let mut ranked: Vec<_> = scores.into_iter().collect();
-	ranked.sort_by(|a, b| cmp_partial(&b.1, &a.1));
+	// Score descending, ties broken by id ascending. The id tiebreak makes the
+	// order a deterministic total order (the source is a HashMap, whose iteration
+	// order is not stable across runs), so which equal-score hits survive the
+	// `truncate(k)` boundary is reproducible — same convention as fuse::rrf.
+	ranked.sort_by(|a, b| cmp_partial(&b.1, &a.1).then_with(|| a.0.cmp(&b.0)));
 	ranked.truncate(k);
 	ranked.into_iter().map(EntityHit::from).collect()
 }
