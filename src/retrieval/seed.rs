@@ -78,12 +78,7 @@ pub fn seed(
 		// — the same predicate the post-filter applies — so the two never diverge.
 		_ => match opts {
 			Some(o) if o.is_active() => {
-				let keep = |id: &str| {
-					g.kern_of_entity(id)
-						.and_then(|kid| g.kerns.get(kid))
-						.and_then(|kern| kern.entities.get(id))
-						.is_some_and(|e| matches_filter(e, o))
-				};
+				let keep = matches_keep(g, o);
 				search_all_filtered(g, query_vec, k, &keep)
 			}
 			_ => search_all_unlocked(g, query_vec, k),
@@ -95,9 +90,34 @@ pub fn seed(
 	hits
 }
 
-pub fn seed_lexical(lex: &LexicalIndex, query_text: &str, k: usize) -> Vec<EntityHit> {
-	lex.search(query_text, k)
-		.into_iter()
+/// A `keep(id)` predicate that resolves an entity id to its entity BY REFERENCE
+/// and applies [`matches_filter`] — the single filter shared by the dense ANN
+/// search, the lexical search, and the post-filter, so a filtered seed can never
+/// diverge from what the post-filter would have kept.
+fn matches_keep<'a>(g: &'a GraphGnn, opts: &'a QueryOptions) -> impl Fn(&str) -> bool + 'a {
+	move |id: &str| {
+		g.kern_of_entity(id)
+			.and_then(|kid| g.kerns.get(kid))
+			.and_then(|kern| kern.entities.get(id))
+			.is_some_and(|e| matches_filter(e, opts))
+	}
+}
+
+pub fn seed_lexical(
+	lex: &LexicalIndex,
+	g: &GraphGnn,
+	query_text: &str,
+	k: usize,
+	opts: Option<&QueryOptions>,
+) -> Vec<EntityHit> {
+	// Filter BEFORE the BM25 top-k truncation when a filter is active, so a sparse
+	// filter still yields k matching lexical hits (no fewer-than-k). No active
+	// filter -> the unchanged unfiltered search.
+	let raw = match opts {
+		Some(o) if o.is_active() => lex.search_filtered(query_text, k, &matches_keep(g, o)),
+		_ => lex.search(query_text, k),
+	};
+	raw.into_iter()
 		.map(|h| EntityHit {
 			entity_id: h.entity_id,
 			score: h.score as f64,

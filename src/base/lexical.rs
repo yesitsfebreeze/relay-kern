@@ -49,6 +49,16 @@ impl LexicalIndex {
 	}
 
 	pub fn search(&self, query: &str, k: usize) -> Vec<LexicalHit> {
+		self.search_filtered(query, k, &|_| true)
+	}
+
+	/// Like [`search`](Self::search) but drops hits whose entity id fails `keep`
+	/// BEFORE the top-`k` truncation. BM25 scores every doc containing a query
+	/// token, so filtering pre-truncation returns a full `k` *matching* hits — no
+	/// over-fetch, and none of the post-filtering fewer-than-k loss. `keep` is built
+	/// at the retrieval layer from a `QueryOptions` filter (`score::matches_filter`),
+	/// keeping this base-layer index free of any retrieval dependency.
+	pub fn search_filtered(&self, query: &str, k: usize, keep: &dyn Fn(&str) -> bool) -> Vec<LexicalHit> {
 		let tokens = tokenize(query);
 		if tokens.is_empty() || k == 0 {
 			return Vec::new();
@@ -88,6 +98,7 @@ impl LexicalIndex {
 		// Score descending, ties broken by entity_id ascending so the set that
 		// survives `truncate(k)` is reproducible across runs (the source is a
 		// HashMap with unstable iteration order) — same convention as fuse::rrf.
+		hits.retain(|h| keep(&h.entity_id));
 		hits.sort_by(|a, b| crate::base::util::cmp_rank(a.score, &a.entity_id, b.score, &b.entity_id));
 		hits.truncate(k);
 		hits
@@ -242,6 +253,38 @@ mod tests {
 		assert_eq!(hits[0].entity_id, "d3", "higher term frequency ranks first");
 		assert_eq!(hits[1].entity_id, "d1");
 		assert!(!hits.iter().any(|h| h.entity_id == "d2"), "d2 shares no terms");
+	}
+
+	#[test]
+	fn search_filtered_drops_nonmatching_before_truncation() {
+		let idx = LexicalIndex::new_in_ram(1.2, 0.75);
+		// All five docs match the query term; only the "keep_" ones pass the keep.
+		idx.insert("drop_a", "rust rust rust"); // high tf -> tops an unfiltered search
+		idx.insert("drop_b", "rust rust");
+		idx.insert("keep_1", "rust");
+		idx.insert("keep_2", "rust ownership");
+		idx.insert("drop_c", "rust borrow");
+
+		// Unfiltered top-1 is a high-tf drop doc.
+		let top1 = idx.search("rust", 1);
+		assert!(top1[0].entity_id.starts_with("drop_"), "unfiltered top-1: {}", top1[0].entity_id);
+
+		// Filtered top-1: higher-scoring non-matching docs are removed BEFORE the
+		// truncate, so a matching doc is returned — not an empty/fewer-than-1 result.
+		let keep = |id: &str| id.starts_with("keep_");
+		let f = idx.search_filtered("rust", 1, &keep);
+		assert_eq!(f.len(), 1, "still a full k=1 after filtering");
+		assert!(f[0].entity_id.starts_with("keep_"), "only matching docs survive: {}", f[0].entity_id);
+
+		// k beyond the match count returns exactly the matches.
+		let want: std::collections::HashSet<String> =
+			["keep_1", "keep_2"].iter().map(|s| s.to_string()).collect();
+		let got: std::collections::HashSet<String> =
+			idx.search_filtered("rust", 10, &keep).into_iter().map(|h| h.entity_id).collect();
+		assert_eq!(got, want, "filtered to all matches");
+
+		// search delegates to search_filtered with an always-true keep: unchanged.
+		assert_eq!(idx.search("rust", 10).len(), 5, "unfiltered returns all 5 docs");
 	}
 
 	#[test]
