@@ -69,6 +69,16 @@ impl VectorBackend {
 		}
 	}
 
+	/// Number of post-snapshot writes buffered in the disk `delta` (0 when not
+	/// disk-backed). Drives the consolidation trigger: a large delta means the
+	/// in-RAM overlay has grown and the snapshot should be rebuilt.
+	pub fn pending_delta_len(&self) -> usize {
+		match self {
+			Self::Resident(_) => 0,
+			Self::Disk { delta, .. } => delta.len(),
+		}
+	}
+
 	/// Whether the index holds no vectors at all. For [`Disk`](Self::Disk) this is
 	/// the cheap structural check (snapshot and delta both empty); a fully
 	/// tombstoned-but-non-empty snapshot still reports non-empty, which only costs

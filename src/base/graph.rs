@@ -288,6 +288,36 @@ impl GraphGnn {
 		}
 	}
 
+	/// Rebuild the entity disk snapshot from the current resident entities and
+	/// reset the in-RAM delta and tombstones. No-op unless the entity index is
+	/// disk-backed. Without this the delta grows without bound on a long-running
+	/// daemon (every post-snapshot write buffers there); folding it back keeps the
+	/// resident overlay small. The source of truth is `self.kerns` — every delta
+	/// entity is also stored there — so this re-snapshots from kerns (identical
+	/// live membership, Superseded/forgotten ids naturally dropped), not from the
+	/// delta. A build failure falls back to a correct in-RAM rebuild.
+	pub fn consolidate_disk_index(&mut self) {
+		if !matches!(self.entity_idx, VectorBackend::Disk { .. }) {
+			return;
+		}
+		// Drop the old snapshot's mmap FIRST so the rebuild can overwrite its files
+		// (Windows locks memory-mapped files). A transient empty resident index
+		// stands in; the caller holds the graph write lock, so no search sees it.
+		self.entity_idx = VectorBackend::resident(16, 200, self.quant_mode);
+		match self.build_entity_disk_snapshot() {
+			Some(snapshot) => self.entity_idx = VectorBackend::disk(snapshot, self.quant_mode),
+			// Build failed mid-consolidate: repopulate a correct in-RAM index so the
+			// graph is never left with the empty placeholder above.
+			None => self.rebuild_index(),
+		}
+	}
+
+	/// Post-snapshot writes currently buffered in the disk delta (0 if the entity
+	/// index is not disk-backed). Drives the consolidation cadence.
+	pub fn pending_disk_delta_len(&self) -> usize {
+		self.entity_idx.pending_delta_len()
+	}
+
 	pub fn get(&mut self, id: &str) -> Option<&Kern> {
 		if self.kerns.contains_key(id) {
 			if let Some(k) = self.kerns.get_mut(id) {
@@ -754,6 +784,70 @@ mod tests {
 		g.set_disk_threshold(1);
 		g.rebuild_index();
 		assert!(matches!(g.entity_idx, VectorBackend::Resident(_)), "no data_dir -> never spill (nowhere to write)");
+	}
+
+	#[test]
+	fn consolidate_folds_delta_into_snapshot_and_resets_it() {
+		// I6: post-snapshot writes buffer in the delta; consolidate re-snapshots
+		// from kerns, leaving the delta empty while keeping every entity searchable.
+		let dir = tempfile::tempdir().unwrap();
+		let mut g = GraphGnn::new();
+		g.data_dir = dir.path().to_string_lossy().into_owned();
+		let kid = g.root.id.clone();
+		if let Some(k) = g.get_mut(&kid) {
+			for i in 0..30 {
+				k.entities.insert(
+					format!("e{i}"),
+					Entity { id: format!("e{i}"), vector: vec8(i), status: EntityStatus::Active, ..Default::default() },
+				);
+			}
+		}
+		g.set_disk_threshold(10);
+		g.rebuild_index();
+		assert!(matches!(g.entity_idx, VectorBackend::Disk { .. }), "spilled to disk");
+		assert_eq!(g.pending_disk_delta_len(), 0, "fresh snapshot has an empty delta");
+
+		// Add entities AFTER the snapshot, mirroring the live path (source of truth
+		// AND the index/delta both get the write).
+		if let Some(k) = g.get_mut(&kid) {
+			for i in 100..115 {
+				k.entities.insert(
+					format!("e{i}"),
+					Entity { id: format!("e{i}"), vector: vec8(i), status: EntityStatus::Active, ..Default::default() },
+				);
+			}
+		}
+		for i in 100..115 {
+			g.entity_idx.insert(format!("e{i}"), vec8(i));
+		}
+		assert_eq!(g.pending_disk_delta_len(), 15, "post-snapshot inserts buffered in the delta");
+
+		g.consolidate_disk_index();
+		assert!(matches!(g.entity_idx, VectorBackend::Disk { .. }), "still disk-backed after consolidate");
+		assert_eq!(g.pending_disk_delta_len(), 0, "delta folded into the rebuilt snapshot");
+
+		// Both pre- and post-snapshot entities are searchable from the new snapshot.
+		let new_hit = crate::base::search::search_all_unlocked(&g, &vec8(108), 5);
+		assert_eq!(new_hit.first().map(|h| h.entity_id.clone()), Some("e108".into()), "folded-in entity searchable");
+		let old_hit = crate::base::search::search_all_unlocked(&g, &vec8(5), 5);
+		assert_eq!(old_hit.first().map(|h| h.entity_id.clone()), Some("e5".into()), "original entity still searchable");
+	}
+
+	#[test]
+	fn consolidate_is_a_noop_for_a_resident_index() {
+		// Never disk-backed: consolidate must not panic or change the backend.
+		let mut g = GraphGnn::new();
+		let kid = g.root.id.clone();
+		if let Some(k) = g.get_mut(&kid) {
+			k.entities.insert(
+				"a".into(),
+				Entity { id: "a".into(), vector: vec8(1), status: EntityStatus::Active, ..Default::default() },
+			);
+		}
+		g.rebuild_index();
+		g.consolidate_disk_index();
+		assert!(matches!(g.entity_idx, VectorBackend::Resident(_)), "resident index untouched");
+		assert_eq!(g.pending_disk_delta_len(), 0);
 	}
 
 	#[test]
