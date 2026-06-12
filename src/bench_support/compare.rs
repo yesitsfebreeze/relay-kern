@@ -12,6 +12,7 @@ use std::time::Instant;
 use crate::base::types::EntityKind;
 
 use super::backend::{Doc, VectorBackend};
+use super::embed;
 use super::ndcg;
 
 /// A query against the corpus: the pre-embedded query vector, the expected
@@ -28,6 +29,57 @@ pub struct CompareQuery {
 pub struct Corpus {
 	pub docs: Vec<Doc>,
 	pub queries: Vec<CompareQuery>,
+}
+
+impl Corpus {
+	/// A deterministic synthetic corpus for SCALE testing the comparison harness.
+	/// `n_docs` documents each draw 8 tokens from a shared vocabulary (so vectors
+	/// overlap and ANN recall is non-trivial, not a toy orthogonal set), and
+	/// `n_queries` queries each take a 4-token subset of one target doc's tokens —
+	/// so the target is the intended best match but real overlap from other docs
+	/// makes recall discriminating. Embedded once via the bench embedder, so it
+	/// drives any [`VectorBackend`] identically. `seed` makes it reproducible
+	/// (no `rand`).
+	pub fn synthetic(n_docs: usize, n_queries: usize, seed: u64) -> Self {
+		let vocab: Vec<String> = (0..200).map(|i| format!("term{i}")).collect();
+		let mut s = seed | 1; // xorshift needs a non-zero state
+		let mut next = move || {
+			s ^= s << 13;
+			s ^= s >> 7;
+			s ^= s << 17;
+			s
+		};
+
+		let mut doc_tokens: Vec<Vec<usize>> = Vec::with_capacity(n_docs);
+		let docs: Vec<Doc> = (0..n_docs)
+			.map(|i| {
+				let toks: Vec<usize> = (0..8).map(|_| (next() as usize) % vocab.len()).collect();
+				let text = toks.iter().map(|&t| vocab[t].as_str()).collect::<Vec<_>>().join(" ");
+				doc_tokens.push(toks);
+				Doc { id: format!("doc{i}"), vector: embed::embed(&text), kind: Some(EntityKind::Claim) }
+			})
+			.collect();
+
+		let queries: Vec<CompareQuery> = (0..n_queries)
+			.map(|q| {
+				let target = (next() as usize) % n_docs.max(1);
+				let text = doc_tokens[target]
+					.iter()
+					.take(4)
+					.map(|&t| vocab[t].as_str())
+					.collect::<Vec<_>>()
+					.join(" ");
+				CompareQuery {
+					id: format!("q{q}"),
+					vector: embed::embed(&text),
+					expected_ids: vec![format!("doc{target}")],
+					kind_filter: None,
+				}
+			})
+			.collect();
+
+		Corpus { docs, queries }
+	}
 }
 
 /// One backend's scored result — the row in the head-to-head table.
@@ -108,6 +160,33 @@ mod tests {
 		assert!(reports[0].mean_ndcg10 > 0.0);
 		assert!(reports[0].mean_latency_ms >= 0.0);
 		assert!(reports[0].vector_bytes > 0);
+	}
+
+	#[test]
+	fn synthetic_corpus_drives_a_scale_comparison() {
+		// 500 docs / 50 queries: a non-trivial scale where recall is meaningful and
+		// the harness exercises real ANN traversal (not a 4-doc toy).
+		let corpus = Corpus::synthetic(500, 50, 42);
+		assert_eq!(corpus.docs.len(), 500);
+		assert_eq!(corpus.queries.len(), 50);
+		let mut backends: Vec<Box<dyn VectorBackend>> = vec![Box::new(KernBackend::new())];
+		let r = compare(&mut backends, &corpus);
+		// The target shares the query's tokens, so it should land in the top-10 for
+		// a substantial fraction of queries (discriminating, not trivially perfect).
+		assert!(
+			r[0].mean_recall10 > 0.3,
+			"scale recall@10 should be substantial, got {}",
+			r[0].mean_recall10
+		);
+		assert!(r[0].vector_bytes > 0);
+	}
+
+	#[test]
+	fn synthetic_corpus_is_deterministic_for_a_seed() {
+		let a = Corpus::synthetic(20, 5, 7);
+		let b = Corpus::synthetic(20, 5, 7);
+		assert_eq!(a.docs[0].vector, b.docs[0].vector, "same seed -> identical doc vectors");
+		assert_eq!(a.queries[0].expected_ids, b.queries[0].expected_ids, "same query targets");
 	}
 
 	#[test]
