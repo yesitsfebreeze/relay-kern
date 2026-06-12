@@ -189,6 +189,18 @@ pub const COLD_GC_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// `StigmergyGc` tasks per kern while one is pending.
 pub const STIGMERGY_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
+/// How often the pulse driver may trigger a disk-index consolidation (fold the
+/// in-RAM delta back into a fresh DiskANN snapshot). Only fires when the entity
+/// index is disk-backed AND the delta has grown past
+/// [`DISK_CONSOLIDATE_MIN_DELTA`]; hourly bounds delta growth without paying the
+/// snapshot-rebuild cost too often.
+pub const DISK_CONSOLIDATE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// Minimum number of buffered post-snapshot writes in the disk delta before a
+/// consolidation is worth its rebuild cost. Below this the delta is small enough
+/// to keep searching in RAM.
+pub const DISK_CONSOLIDATE_MIN_DELTA: usize = 10_000;
+
 pub const USER_SOURCE: &str = "user";
 pub const AGENT_SOURCE: &str = "agent";
 pub const SOURCE_CHAT: &str = "chat";

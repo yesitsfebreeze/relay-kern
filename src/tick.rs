@@ -21,7 +21,7 @@ use crate::gnn::propagate::GnnConfig;
 use cluster::{cohesion, is_core_cluster, vector_cluster, Cluster};
 use gnn_propagate::do_gnn_propagate;
 use queue::{task, task_extra, Queue, Task, TaskKind};
-use tasks::{do_enrich, do_name, do_persist, do_reembed, do_resolve, BroadcastQuestionFunc, EmbedFunc, LlmFunc};
+use tasks::{do_disk_consolidate, do_enrich, do_name, do_persist, do_reembed, do_resolve, BroadcastQuestionFunc, EmbedFunc, LlmFunc};
 
 /// Long-lived dependencies the tick worker carries across every task it
 /// processes: the LLM / embed / broadcast hooks plus the GNN, tick, and
@@ -61,6 +61,7 @@ fn process_task(q: &Queue, g: &Arc<RwLock<GraphGnn>>, t: &Task, ctx: &TickContex
 		TaskKind::GnnPropagate => do_gnn_propagate(q, g, &t.kern_id, &ctx.gnn_cfg),
 		TaskKind::StigmergyGc => stigmergy::run_gc(g, &t.kern_id),
 		TaskKind::Reembed => do_reembed(g, &t.kern_id, embed),
+		TaskKind::DiskConsolidate => do_disk_consolidate(g),
 	}
 }
 

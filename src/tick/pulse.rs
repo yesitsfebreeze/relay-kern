@@ -1,7 +1,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::base::constants::{PULSE_DECAY, PULSE_THRESHOLD, STIGMERGY_GC_INTERVAL};
+use crate::base::constants::{
+	DISK_CONSOLIDATE_INTERVAL, DISK_CONSOLIDATE_MIN_DELTA, PULSE_DECAY, PULSE_THRESHOLD,
+	STIGMERGY_GC_INTERVAL,
+};
 use crate::base::graph::GraphGnn;
 use crate::base::heat::{self, HeatConfig};
 
@@ -25,6 +28,7 @@ pub fn pulse(q: &Queue, g: &mut GraphGnn, kern_id: &str, strength: f64) {
 	if strength >= PULSE_THRESHOLD {
 		maybe_enqueue_stigmergy_gc(q, g);
 		maybe_enqueue_reembed(q, g);
+		maybe_enqueue_disk_consolidate(q, g);
 	}
 }
 
@@ -62,6 +66,49 @@ fn maybe_enqueue_stigmergy_gc(q: &Queue, g: &GraphGnn) {
 	for kern_id in g.kerns.keys() {
 		q.enqueue(task(TaskKind::StigmergyGc, kern_id));
 	}
+}
+
+/// Last unix-seconds at which `maybe_enqueue_disk_consolidate` fanned out a
+/// consolidation, single-flighted by `compare_exchange` like [`LAST_GC_AT_SECS`].
+static LAST_CONSOLIDATE_AT_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// Pure decision: enqueue a disk consolidation now? Only when the delta has grown
+/// past `min_delta` AND `interval` has elapsed since the last one (delegated to
+/// [`should_run_gc`] so the clock-skew / zero-clock guards are shared).
+pub fn should_consolidate(
+	now_secs: u64,
+	last_secs: u64,
+	interval: Duration,
+	delta_len: usize,
+	min_delta: usize,
+) -> bool {
+	delta_len >= min_delta && should_run_gc(now_secs, last_secs, interval)
+}
+
+/// Single-flight, interval-gated enqueue of a graph-global `DiskConsolidate` when
+/// the disk index's in-RAM delta has grown enough to be worth a snapshot rebuild.
+/// Cheap early-out when not disk-backed (`pending_disk_delta_len` is 0).
+fn maybe_enqueue_disk_consolidate(q: &Queue, g: &GraphGnn) {
+	let delta = g.pending_disk_delta_len();
+	if delta < DISK_CONSOLIDATE_MIN_DELTA {
+		return;
+	}
+	let now_secs = SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.map(|d| d.as_secs())
+		.unwrap_or(0);
+	let last = LAST_CONSOLIDATE_AT_SECS.load(Ordering::Relaxed);
+	if !should_consolidate(now_secs, last, DISK_CONSOLIDATE_INTERVAL, delta, DISK_CONSOLIDATE_MIN_DELTA) {
+		return;
+	}
+	if LAST_CONSOLIDATE_AT_SECS
+		.compare_exchange(last, now_secs, Ordering::AcqRel, Ordering::Relaxed)
+		.is_err()
+	{
+		return;
+	}
+	// Graph-global task: a fixed empty key means at most one is ever pending.
+	q.enqueue(task(TaskKind::DiskConsolidate, ""));
 }
 
 /// Enqueue a `Reembed` sweep for every kern that has a dirty (edited) thought or
@@ -176,6 +223,19 @@ mod tests {
 		assert!(!should_run_gc(100, 50, iv), "50s elapsed < 100s interval -> no");
 		assert!(should_run_gc(150, 50, iv), "exactly the interval -> yes (>=)");
 		assert!(should_run_gc(200, 50, iv), "well past the interval -> yes");
+	}
+
+	#[test]
+	fn should_consolidate_gates_on_both_delta_size_and_interval() {
+		let iv = Duration::from_secs(100);
+		// Interval elapsed but delta below the floor -> no (not worth a rebuild).
+		assert!(!should_consolidate(200, 50, iv, 9, 10), "delta < min_delta -> no");
+		// Delta big enough but interval not elapsed -> no (don't thrash rebuilds).
+		assert!(!should_consolidate(100, 50, iv, 100, 10), "interval not elapsed -> no");
+		// Both conditions met -> yes.
+		assert!(should_consolidate(150, 50, iv, 10, 10), "delta>=min and interval elapsed -> yes");
+		// Shares should_run_gc's clock guards.
+		assert!(!should_consolidate(0, 0, iv, 1000, 10), "unreadable clock never consolidates");
 	}
 
 	#[test]

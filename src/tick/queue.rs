@@ -21,6 +21,10 @@ pub enum TaskKind {
 	StigmergyGc,
 	/// Re-embed dirty (edited) thoughts/reasons in a kern and clear the flag.
 	Reembed,
+	/// Fold the disk-backed entity index's in-RAM delta into a fresh DiskANN
+	/// snapshot and reset it. Graph-global (not per-kern); dispatched in
+	/// `tick::process_task` to `GraphGnn::consolidate_disk_index`.
+	DiskConsolidate,
 }
 
 #[derive(Debug, Clone)]

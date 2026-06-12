@@ -285,6 +285,13 @@ pub fn do_resolve(
 	}
 }
 
+/// Fold the disk-backed entity index's in-RAM delta into a fresh DiskANN snapshot
+/// and reset it (see [`GraphGnn::consolidate_disk_index`]). Graph-global — the
+/// task carries no kern. No-op when the entity index is not disk-backed.
+pub fn do_disk_consolidate(g: &Arc<RwLock<GraphGnn>>) {
+	write_recovered(g).consolidate_disk_index();
+}
+
 pub fn do_persist(g: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 	let graph = read_recovered(g);
 	let store = match graph.store() {
