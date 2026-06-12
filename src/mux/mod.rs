@@ -5,11 +5,13 @@
 
 pub mod delegate;
 pub mod pty;
+mod questions;
 pub mod registry;
 mod research;
 pub mod tui;
 
 pub use delegate::{boot_message, result_key, task_key};
+pub use questions::{QuestionsAction, QuestionsOverlay};
 pub use research::ResearchPanel;
 pub use pty::{new_session_id, PtySession};
 pub use registry::{PaneRegistry, SharedRegistry};
