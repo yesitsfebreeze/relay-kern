@@ -99,7 +99,7 @@ pub fn retrieve(
 ) -> Retrieved {
 	let lexical = g.lexical();
 	let lex_ref = lexical.as_deref();
-	let dense_seeds = seed::seed(g, cfg, qvec, cfg.seed_k, mode);
+	let dense_seeds = seed::seed(g, cfg, qvec, cfg.seed_k, mode, opts);
 
 	let seeds = if mode == Mode::Hybrid && cfg.lexical_enabled && !query_text.is_empty() {
 		if let Some(lex) = lex_ref {

@@ -42,6 +42,22 @@ pub struct QueryOptions {
 	pub valid_at: Option<SystemTime>,
 }
 
+impl QueryOptions {
+	/// Whether any metadata filter is set. `sort`/`ascending` are presentation,
+	/// not filters, so they are excluded. When this is false, [`matches_filter`]
+	/// accepts every entity, so callers can take the cheaper unfiltered ANN path
+	/// instead of filtering during traversal.
+	pub fn is_active(&self) -> bool {
+		!self.source.is_empty()
+			|| self.kind.is_some()
+			|| self.scheme.is_some()
+			|| self.min_conf > 0.0
+			|| self.since.is_some()
+			|| self.before.is_some()
+			|| self.valid_at.is_some()
+	}
+}
+
 pub fn qbst(cfg: &RetrievalConfig, access_count: i32, accessed_at: Option<SystemTime>) -> f64 {
 	let access = (access_count as f64 + 1.0).ln() * cfg.qbst_access_weight;
 	let recency = match accessed_at {

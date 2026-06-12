@@ -1,7 +1,10 @@
 use crate::base::graph::GraphGnn;
 use crate::base::lexical::LexicalIndex;
 use crate::base::math::cosine;
-use crate::base::search::{search_all_unlocked, search_reasons_all_unlocked, EntityHit};
+use crate::base::search::{
+	search_all_filtered, search_all_unlocked, search_reasons_all_unlocked, EntityHit,
+};
+use crate::retrieval::score::{matches_filter, QueryOptions};
 use crate::config::RetrievalConfig;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -62,10 +65,29 @@ pub fn seed(
 	query_vec: &[f64],
 	k: usize,
 	mode: Mode,
+	opts: Option<&QueryOptions>,
 ) -> Vec<EntityHit> {
 	let mut hits = match mode {
 		Mode::Reason => seed_by_reason(g, query_vec, k),
-		_ => search_all_unlocked(g, query_vec, k),
+		// Filter DURING the ANN traversal when a filter is active: a sparse filter
+		// then still yields k matching dense hits, instead of post-filtering an
+		// unfiltered top-k down to fewer-than-k (the post-filtering coverage bug).
+		// With no active filter this is the unchanged unfiltered path, so unfiltered
+		// queries are byte-identical. The `keep` predicate resolves each candidate
+		// id to its entity BY REFERENCE (no clone) and reuses `score::matches_filter`
+		// — the same predicate the post-filter applies — so the two never diverge.
+		_ => match opts {
+			Some(o) if o.is_active() => {
+				let keep = |id: &str| {
+					g.kern_of_entity(id)
+						.and_then(|kid| g.kerns.get(kid))
+						.and_then(|kern| kern.entities.get(id))
+						.is_some_and(|e| matches_filter(e, o))
+				};
+				search_all_filtered(g, query_vec, k, &keep)
+			}
+			_ => search_all_unlocked(g, query_vec, k),
+		},
 	};
 	let important = seed_important(g, cfg, query_vec);
 	hits = merge_seeds(hits, important);
@@ -201,6 +223,68 @@ mod tests {
 		assert!(ids.contains("fact"), "a Fact is important regardless of access count");
 		assert!(!ids.contains("cold"), "low-access non-fact is dominated");
 		assert!(!ids.contains("off"), "below the cosine threshold is excluded");
+	}
+
+	#[test]
+	fn active_kind_filter_seeds_matches_post_filtering_would_miss() {
+		// 30 Claims identical to the query (cosine 1.0) bury 3 Facts (cosine ~0.994)
+		// below any unfiltered top-k. Importance is disabled (an impossible
+		// min_cosine) to isolate the dense seed. Without filtering, the dense top-k
+		// is all Claims, so a kind=Fact post-filter would surface ZERO Facts.
+		// Filtering during traversal returns the Facts instead — the fewer-than-k fix.
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("kx", "");
+		for i in 0..30 {
+			let e = ent(&format!("claim{i}"), vec![1.0, 0.0], 0, false);
+			k.entities.insert(e.id.clone(), e);
+		}
+		for i in 0..3 {
+			let e = ent(&format!("fact{i}"), vec![0.9, 0.1], 0, true);
+			k.entities.insert(e.id.clone(), e);
+		}
+		g.kerns.insert("kx".into(), k);
+		g.rebuild_index();
+
+		let cfg = RetrievalConfig { important_min_cosine: 1.5, seed_k: 5, ..Default::default() };
+		let q = [1.0, 0.0];
+
+		// Unfiltered: the dense top-k is dominated by the closer Claims; no Facts.
+		let unfiltered = seed(&g, &cfg, &q, 5, Mode::Content, None);
+		assert!(
+			unfiltered.iter().all(|h| h.entity_id.starts_with("claim")),
+			"unfiltered dense seed is all Claims: {:?}",
+			unfiltered.iter().map(|h| &h.entity_id).collect::<Vec<_>>()
+		);
+
+		// kind=Fact: filtered traversal surfaces the Facts the post-filter would miss.
+		let opts = QueryOptions { kind: Some(EntityKind::Fact), ..Default::default() };
+		let filtered = seed(&g, &cfg, &q, 5, Mode::Content, Some(&opts));
+		assert!(
+			!filtered.is_empty() && filtered.iter().all(|h| h.entity_id.starts_with("fact")),
+			"filtered seed returns only matching Facts: {:?}",
+			filtered.iter().map(|h| &h.entity_id).collect::<Vec<_>>()
+		);
+	}
+
+	#[test]
+	fn unfiltered_seed_is_unchanged_when_opts_is_inactive() {
+		// A None filter and a present-but-empty filter must both take the unfiltered
+		// path and return an identical seed (the is_active() gate).
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("kx", "");
+		for i in 0..6 {
+			let e = ent(&format!("e{i}"), vec![1.0, i as f64 * 0.01], 0, false);
+			k.entities.insert(e.id.clone(), e);
+		}
+		g.kerns.insert("kx".into(), k);
+		g.rebuild_index();
+		let cfg = RetrievalConfig { important_min_cosine: 1.5, seed_k: 4, ..Default::default() };
+		let q = [1.0, 0.0];
+
+		let none = seed(&g, &cfg, &q, 4, Mode::Content, None);
+		let empty = seed(&g, &cfg, &q, 4, Mode::Content, Some(&QueryOptions::default()));
+		let ids = |v: &[EntityHit]| v.iter().map(|h| h.entity_id.clone()).collect::<Vec<_>>();
+		assert_eq!(ids(&none), ids(&empty), "inactive filter == unfiltered path");
 	}
 
 	#[test]
