@@ -28,6 +28,15 @@ pub fn open_default() -> std::io::Result<DayJournal> {
 	DayJournal::open(&cwd)
 }
 
+/// Today's local date as `YYYY-MM-DD` (UTC fallback). The day key used by the
+/// archive's `day` column and the compactor's "is this day complete yet" check.
+pub fn today() -> String {
+	time::OffsetDateTime::now_local()
+		.unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+		.date()
+		.to_string()
+}
+
 use std::sync::OnceLock;
 
 static GLOBAL: OnceLock<DayJournal> = OnceLock::new();

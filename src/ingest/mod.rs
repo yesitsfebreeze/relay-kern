@@ -18,6 +18,7 @@
 pub mod capture_spool;
 pub mod compactor;
 pub mod config;
+pub mod day_digest;
 pub mod dedup;
 pub mod distill;
 pub mod embed;

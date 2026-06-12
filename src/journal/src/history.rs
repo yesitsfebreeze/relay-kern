@@ -10,6 +10,8 @@ use crate::entry::{Entry, Kind, SCHEMA_VERSION};
 pub struct Filter {
 	pub kind: Option<Kind>,
 	pub key: Option<String>,
+	/// Exact archive day key, `YYYY-MM-DD` (the stored `day` column).
+	pub day: Option<String>,
 	pub since_ms: Option<u64>,
 	pub until_ms: Option<u64>,
 	pub limit: Option<u64>,
@@ -72,8 +74,34 @@ impl History {
 				CREATE TABLE IF NOT EXISTS compacted_segments (
 					name  TEXT    PRIMARY KEY,
 					ts_ms INTEGER NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS rendered_digests (
+					day   TEXT    PRIMARY KEY,
+					ts_ms INTEGER NOT NULL
 				);",
 		)
+}
+
+	/// Whether a daily digest has already been rendered for `day` (YYYY-MM-DD),
+	/// so the compactor renders each day's note (and its one LLM call) once.
+	pub fn digest_done(&self, day: &str) -> rusqlite::Result<bool> {
+		let conn = self.conn.lock().expect("history mutex poisoned");
+		let n: i64 = conn.query_row(
+			"SELECT COUNT(*) FROM rendered_digests WHERE day = ?",
+			params![day],
+			|r| r.get(0),
+		)?;
+		Ok(n > 0)
+}
+
+	/// Record that a day's digest has been rendered (idempotent).
+	pub fn mark_digest(&self, day: &str) -> rusqlite::Result<()> {
+		let conn = self.conn.lock().expect("history mutex poisoned");
+		conn.execute(
+			"INSERT OR IGNORE INTO rendered_digests (day, ts_ms) VALUES (?, ?)",
+			params![day, crate::entry::now_ms() as i64],
+		)?;
+		Ok(())
 }
 
 	/// Whether the named rollover segment was already compacted into the archive.
@@ -134,6 +162,10 @@ impl History {
 		if let Some(key) = filter.key.as_ref() {
 			clauses.push("key = ?");
 			args.push(Box::new(key.clone()));
+		}
+		if let Some(day) = filter.day.as_ref() {
+			clauses.push("day = ?");
+			args.push(Box::new(day.clone()));
 		}
 		if let Some(since) = filter.since_ms {
 			clauses.push("ts_ms >= ?");

@@ -593,7 +593,7 @@ pub(crate) async fn bootstrap(
 	spawn_viewer(cfg, &g, &llm_client, &q, &mcp_server);
 
 	spawn_session_mirror(cfg, &worker);
-	spawn_compactor(cfg);
+	spawn_compactor(cfg, &g, std::sync::Arc::new(llm_client.complete_func()));
 
 	spawn_file_watcher(cfg, &worker);
 
@@ -846,13 +846,13 @@ fn spawn_session_mirror(cfg: &crate::config::Config, worker: &Arc<crate::ingest:
 /// `DayJournal` rollover into `history.db` (the machine-queryable archive),
 /// deleting each segment after a successful insert. The optional Obsidian
 /// "memory of the day" digest is rendered here too when enabled.
-fn spawn_compactor(cfg: &crate::config::Config) {
+fn spawn_compactor(cfg: &crate::config::Config, graph: &SharedGraph, llm: crate::types::LlmFunc) {
 	use crate::ingest::compactor::run;
 	let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 	let interval = std::time::Duration::from_secs(cfg.journal.compactor_interval_secs.max(1));
 	let export = cfg.journal.obsidian_export;
 	let vault = cfg.journal.obsidian_vault.clone();
-	tokio::spawn(run(cwd, interval, export, vault));
+	tokio::spawn(run(cwd, interval, export, vault, graph.clone(), llm));
 }
 
 /// Slice O — kern-side filesystem watcher. Off unless `[watcher] enabled = true`.
