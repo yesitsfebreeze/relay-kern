@@ -48,6 +48,10 @@ struct Args {
 	/// scoring recall/NDCG.
 	#[arg(long)]
 	memory: bool,
+	/// One combined Tier-0 snapshot: corpus size, recall@10/NDCG@10, latency
+	/// p50/p95/p99, throughput, and vector memory — in a single run.
+	#[arg(long)]
+	all: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -73,6 +77,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		println!(
 			"retrieval latency (ms):  mean={:.3}  p50={:.3}  p95={:.3}  p99={:.3}",
 			r.mean_ms, r.p50_ms, r.p95_ms, r.p99_ms
+		);
+		return Ok(());
+	}
+
+	if args.all {
+		use kern::bench_support::{latency, memory};
+		let mem = memory::estimate_memory(&g);
+		let rep = replay(&g, &RetrievalConfig::default(), &t);
+		let lat = latency::measure_latency(&g, &RetrievalConfig::default(), &t, 3, 50);
+		let threads = args.threads.unwrap_or_else(|| {
+			std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+		});
+		let tput = latency::measure_throughput(&g, &RetrievalConfig::default(), &t, threads, 100);
+		println!("=== Tier-0 snapshot: {} ===", t.name);
+		println!("corpus:      {} entities, {} vectors x dim {}", mem.entities, mem.vectors, mem.dim);
+		println!(
+			"quality:     recall@10={:.4}  NDCG@10={:.4}   ({} queries)",
+			rep.mean_recall10, rep.mean_ndcg10, rep.per_query.len()
+		);
+		println!(
+			"latency ms:  mean={:.3}  p50={:.3}  p95={:.3}  p99={:.3}",
+			lat.mean_ms, lat.p50_ms, lat.p95_ms, lat.p99_ms
+		);
+		println!("throughput:  {:.0} qps  ({} threads)", tput.qps, tput.threads);
+		println!(
+			"memory:      vectors f64={:.1} KiB  int8={:.1} KiB  ({:.1}x)",
+			mem.f64_vector_bytes as f64 / 1024.0,
+			mem.int8_vector_bytes as f64 / 1024.0,
+			mem.quant_ratio()
 		);
 		return Ok(());
 	}
