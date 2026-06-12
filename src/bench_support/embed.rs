@@ -9,12 +9,14 @@
 
 use crate::base::util::content_hash;
 
-// 256 (not 64): each token deposits 4 signed values, so a ~10-token document
-// writes ~40 slots — into 64 that is ~40% collisions, which drowns the
-// token-overlap signal and makes the dense leg near-noise. 256 cuts collisions
-// ~4x, so cosine tracks real token overlap and the bench's dense recall becomes
-// faithful. Still tiny vs a real 768-d model; bench-only.
-pub const DIM: usize = 256;
+// 512 (not 64): each token deposits 4 signed values, so a ~10-token document
+// writes ~40 slots. Into 64 that is ~40% collisions, which drowned the
+// token-overlap signal and made the dense leg near-noise (mean recall@10 0.45
+// on synthetic.json). At 512 collisions drop below ~8%, so cosine faithfully
+// tracks token overlap and the harness reaches recall@10 1.0 — i.e. retrieval
+// surfaces every token-overlapping relevant doc, with no residual hashing
+// artifact. Still bench-only; never a substitute for a real semantic model.
+pub const DIM: usize = 512;
 
 pub fn embed(text: &str) -> Vec<f64> {
 	let mut v = vec![0.0f64; DIM];
