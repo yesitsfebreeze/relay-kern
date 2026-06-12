@@ -73,30 +73,86 @@ pub fn run_gc(graph: &Arc<RwLock<GraphGnn>>, kern_id: &str) {
 		return;
 	}
 
-	// Spill victims to the cold tier (in the store) before the hot drop, so
-	// eviction never loses data immediately. `cold_spill` self-caps the tier
-	// (drops oldest past COLD_MAX_ENTRIES), so no separate compaction pass is
-	// needed. The store handle is cloned out (ref-counted) so we can keep
-	// mutating the graph under the single write guard.
+	// Spill each victim to the cold tier before the hot drop, so eviction never
+	// loses data. `cold_spill` self-caps the tier (drops oldest past
+	// COLD_MAX_ENTRIES), so no separate compaction pass is needed. The store
+	// handle is cloned out (ref-counted) so we can keep mutating the graph under
+	// the single write guard.
 	let store = g.store();
-	for id in &victims {
-		if let Some(store) = &store {
-			let victim = g.kerns.get(kern_id).and_then(|k| k.entities.get(id)).cloned();
-			if let Some(e) = victim {
-				let _ = store.cold_spill(&e);
+	evict_victims(&mut g, kern_id, &victims, |e| match &store {
+		// A thought is only safe to drop once it is durably in the cold store.
+		Some(s) => s.cold_spill(e).is_ok(),
+		// No cold store bound: a pure in-memory graph has nowhere to spill, so
+		// dropping is the intended bound on memory (nothing to persist).
+		None => true,
+	});
+}
+
+/// Drop each victim from the hot graph, but only after `spill` confirms it is
+/// durably persisted (`spill` returns `true`). If a spill fails the thought is
+/// kept hot and retried on the next GC pass — we never drop an unpersisted
+/// thought, even if the cold store is transiently erroring. Split out from
+/// [`run_gc`] so the drop-iff-persisted invariant is unit-testable without a
+/// failing store.
+fn evict_victims(
+	g: &mut GraphGnn,
+	kern_id: &str,
+	victims: &[String],
+	mut spill: impl FnMut(&Entity) -> bool,
+) {
+	for id in victims {
+		let victim = g.kerns.get(kern_id).and_then(|k| k.entities.get(id)).cloned();
+		if let Some(e) = victim {
+			if !spill(&e) {
+				// Spill failed → leave the thought in the hot tier for retry.
+				continue;
 			}
 		}
-		remove_entity(&mut g, kern_id, id);
+		remove_entity(g, kern_id, id);
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::base::types::Kern;
 	use std::time::Duration;
 
 	fn ent(kind: EntityKind, heat: f32, accessed_at: Option<SystemTime>) -> Entity {
 		Entity { id: "e".into(), kind, heat, accessed_at, ..Default::default() }
+	}
+
+	fn graph_with_cold_claim(id: &str) -> GraphGnn {
+		let old = SystemTime::now() - (COLD_GC_AGE + Duration::from_secs(1));
+		let mut e = ent(EntityKind::Claim, 0.0, Some(old));
+		e.id = id.into();
+		let mut g = GraphGnn::new();
+		let mut k = Kern::new("k", "");
+		k.entities.insert(id.into(), e);
+		g.kerns.insert("k".into(), k);
+		g
+	}
+
+	#[test]
+	fn evict_keeps_victim_hot_when_spill_fails() {
+		// The data-loss guard: if the cold spill does not durably succeed, the
+		// thought must stay in the hot tier (retried next pass), never dropped.
+		let mut g = graph_with_cold_claim("victim");
+		evict_victims(&mut g, "k", &["victim".to_string()], |_| false);
+		assert!(
+			g.kerns.get("k").unwrap().entities.contains_key("victim"),
+			"spill failure must NOT drop the thought"
+		);
+	}
+
+	#[test]
+	fn evict_drops_victim_once_spill_succeeds() {
+		let mut g = graph_with_cold_claim("victim");
+		evict_victims(&mut g, "k", &["victim".to_string()], |_| true);
+		assert!(
+			!g.kerns.get("k").unwrap().entities.contains_key("victim"),
+			"a durably-spilled thought is dropped from the hot tier"
+		);
 	}
 
 	#[test]
